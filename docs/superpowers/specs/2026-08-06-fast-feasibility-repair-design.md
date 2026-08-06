@@ -194,7 +194,8 @@ def optimize(
 
 修复器首先检查初始审计：
 
-- `all_constraints_met=True` 时原样返回；
+- `all_constraints_met=True`，并且无请求或初始决策已经形成完整执行路径时原样返回；
+- 有请求但 `initial_decision.request_success is not True` 时，即使静态资源和可靠性审计合格，也必须搜索正常工作的替代执行节点；
 - 不执行候选搜索；
 - `attempted=False`；
 - 原有副本位置、路由和冷启动结果保持不变。
