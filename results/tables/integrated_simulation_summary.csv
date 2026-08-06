@@ -1,0 +1,2 @@
+﻿total_slots,total_requests,request_batches,handover_count,user_cold_starts,prewarm_starts,total_prewarm_startup_overhead_ms,warm_hits,expiration_count,deadline_violations,function_stage_cold_start_rate,deadline_violation_rate,average_batch_delay_ms,p95_batch_delay_ms
+117,92,58,4,15,0,0.0,159,12,5,0.08620689655172414,0.08620689655172414,288.62068965517244,1695.0

@@ -1,0 +1,4 @@
+﻿policy_id,display_name,total_requests,request_batches,user_cold_starts,prewarm_starts,warm_hit_batches,expiration_count,retained_idle_slots,total_request_delay_ms,average_delay_per_request_ms,total_delay_cost,total_retention_cost,total_prewarm_cost,total_cost
+on_demand,按需启动,15,8,8,0,0,8,0,2625.0,175.0,2625.0,0.0,0.0,2625.0
+fixed_window,固定窗口(3),15,8,4,0,4,3,14,1425.0,95.0,1425.0,358.40000000000003,0.0,1783.4
+always_warm,始终保温,15,8,0,1,8,0,22,225.0,15.0,225.0,563.2000000000002,1200.0,1988.2000000000003

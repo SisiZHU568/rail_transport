@@ -1,0 +1,712 @@
+"""
+simulator.py
+
+本文件实现第一个完整的轨道边缘 Serverless SFC
+离散时隙仿真器。
+
+它连接以下模块：
+
+1. TrainMobilityModel：
+   更新列车位置和当前接入 MEC。
+
+2. DeterministicWorkload：
+   产生每个时隙的请求数量。
+
+3. PlacementPolicy：
+   决定 SFC 函数部署在哪些 MEC。
+
+4. ContainerLifecycleManager：
+   管理函数容器冷启动、温实例和销毁。
+
+5. LinearMECNetwork：
+   计算跨 MEC 数据传输时延。
+
+6. execute_sfc_batch：
+   执行一批 SFC 请求并计算端到端时延。
+"""
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from src.cold_start import ContainerLifecycleManager
+from src.entities import (
+    FunctionInstance,
+    InstanceStatus,
+    ServerlessFunction,
+    SFCType,
+)
+from src.mobility import TrainMobilityModel
+from src.network import LinearMECNetwork
+from src.placement import PlacementPolicy
+from src.sfc_execution import execute_sfc_batch
+from src.topology import LinearRailTopology
+from src.workload import DeterministicWorkload
+
+
+@dataclass(frozen=True)
+class SlotSimulationRecord:
+    """
+    一个快时隙的完整仿真记录。
+    """
+
+    # 当前快时隙编号
+    time_slot: int
+
+    # 列车位置
+    position_m: float
+
+    # 当前接入 MEC
+    serving_mec: int
+
+    # 下一个 MEC
+    next_mec: int
+
+    # 当前时隙是否发生 MEC 切换
+    handover_occurred: bool
+
+    # 当前时隙到达的请求数量
+    request_count: int
+
+    # 当前 SFC 的函数部署节点
+    placement_node_ids: tuple[int, ...]
+
+    # 当前请求批次中发生冷启动的函数数量
+    cold_start_count: int
+
+    # 当前请求批次中命中温实例的函数数量
+    warm_hit_count: int
+
+    # 当前时隙被销毁的旧容器数量
+    expiration_count: int
+
+    # SFC 总传输时延
+    transmission_delay_ms: float
+
+    # SFC 总冷启动时延
+    cold_start_delay_ms: float
+
+    # SFC 总函数执行时延
+    execution_delay_ms: float
+
+    # SFC 端到端时延
+    end_to_end_delay_ms: float
+
+    # 是否满足时延要求
+    #
+    # 没有请求时设为 None。
+    deadline_met: bool | None
+
+
+@dataclass(frozen=True)
+class SimulationSummary:
+    """
+    一次完整仿真的汇总指标。
+    """
+
+    # 总仿真时隙数
+    total_slots: int
+
+    # 总请求数量
+    total_requests: int
+
+    # 有请求到达的时隙数量
+    request_batches: int
+
+    # MEC 切换次数
+    handover_count: int
+
+    # 用户请求触发的函数冷启动总次数
+    user_cold_starts: int
+
+    # 函数温实例命中总次数
+    warm_hits: int
+
+    # 容器销毁总次数
+    expiration_count: int
+
+    # 违反 SFC 时延约束的请求批次数量
+    deadline_violations: int
+
+    # 函数阶段冷启动率
+    function_stage_cold_start_rate: float
+
+    # 请求批次时延违反率
+    deadline_violation_rate: float
+
+    # 平均请求批次端到端时延
+    average_batch_delay_ms: float
+
+    # P95 请求批次端到端时延
+    p95_batch_delay_ms: float
+
+
+@dataclass(frozen=True)
+class SimulationRunResult:
+    """
+    一次完整仿真的全部结果。
+    """
+
+    summary: SimulationSummary
+    records: tuple[SlotSimulationRecord, ...]
+
+
+class RailServerlessSFCSimulator:
+    """
+    单列车、单 SFC 的离散时隙仿真器。
+
+    当前第一版假设：
+
+    1. 只有一列列车；
+    2. 每个时隙只有一种 SFC 请求；
+    3. 一个函数在一个 MEC 上最多有一个实例；
+    4. 请求批次在当前时隙内处理完成；
+    5. 暂时不考虑 CPU 排队和带宽竞争；
+    6. 暂时不进行主动预热。
+    """
+
+    def __init__(
+        self,
+        topology: LinearRailTopology,
+        network: LinearMECNetwork,
+        mobility_model: TrainMobilityModel,
+        workload: DeterministicWorkload,
+        placement_policy: PlacementPolicy,
+        functions: list[ServerlessFunction],
+        sfc: SFCType,
+        survival_slots: int,
+        input_size_mb_per_request: float,
+        return_result_to_source: bool = True,
+    ) -> None:
+        """
+        创建完整仿真器。
+        """
+
+        if survival_slots <= 0:
+            raise ValueError(
+                "容器生存窗口必须大于 0。"
+            )
+
+        if input_size_mb_per_request < 0:
+            raise ValueError(
+                "单请求输入数据量不能小于 0。"
+            )
+
+        if len(functions) == 0:
+            raise ValueError(
+                "系统中至少需要一个函数。"
+            )
+
+        # 第一版仿真器要求一条 SFC 内的函数编号唯一。
+        if len(sfc.function_ids) != len(
+            set(sfc.function_ids)
+        ):
+            raise ValueError(
+                "当前仿真器要求 SFC 中的函数编号不能重复。"
+            )
+
+        # 创建函数编号到函数对象的映射。
+        function_map: dict[int, ServerlessFunction] = {}
+
+        for function in functions:
+            if function.function_id in function_map:
+                raise ValueError(
+                    f"函数编号 {function.function_id} 重复。"
+                )
+
+            function_map[function.function_id] = function
+
+        # 检查 SFC 所需函数是否都存在。
+        for function_id in sfc.function_ids:
+            if function_id not in function_map:
+                raise KeyError(
+                    f"系统中不存在 function_id={function_id}。"
+                )
+
+        self.topology = topology
+        self.network = network
+        self.mobility_model = mobility_model
+        self.workload = workload
+        self.placement_policy = placement_policy
+        self.functions = functions
+        self.function_map = function_map
+        self.sfc = sfc
+        self.input_size_mb_per_request = (
+            input_size_mb_per_request
+        )
+        self.return_result_to_source = (
+            return_result_to_source
+        )
+
+        # 所有容器使用同一个生存窗口参数。
+        self.lifecycle_manager = (
+            ContainerLifecycleManager(
+                survival_slots=survival_slots
+            )
+        )
+
+        # 保存所有已经被创建过的函数实例。
+        #
+        # 字典键：
+        #     (node_id, function_id)
+        #
+        # 字典值：
+        #     FunctionInstance
+        self.instances: dict[
+            tuple[int, int],
+            FunctionInstance,
+        ] = {}
+
+    def _get_or_create_instance(
+        self,
+        node_id: int,
+        function_id: int,
+    ) -> FunctionInstance:
+        """
+        获取指定 MEC 上的函数实例。
+
+        如果该实例从未出现过，则创建一个 ABSENT 状态对象。
+        """
+
+        instance_key = (
+            node_id,
+            function_id,
+        )
+
+        if instance_key not in self.instances:
+            self.instances[instance_key] = (
+                FunctionInstance(
+                    node_id=node_id,
+                    function_id=function_id,
+                    status=InstanceStatus.ABSENT,
+                )
+            )
+
+        return self.instances[instance_key]
+
+    def _process_active_request_batch(
+        self,
+        placement_node_ids: list[int],
+        request_count: int,
+    ) -> tuple[
+        set[tuple[int, int]],
+        set[int],
+        int,
+        int,
+    ]:
+        """
+        更新当前请求使用的函数容器状态。
+
+        Returns
+        -------
+        used_instance_keys:
+            当前时隙被请求使用的实例键。
+
+        cold_start_function_ids:
+            当前发生冷启动的函数编号。
+
+        cold_start_count:
+            冷启动函数数量。
+
+        warm_hit_count:
+            温实例命中函数数量。
+        """
+
+        if len(placement_node_ids) != len(
+            self.sfc.function_ids
+        ):
+            raise ValueError(
+                "部署节点数量与 SFC 函数数量不一致。"
+            )
+
+        used_instance_keys: set[
+            tuple[int, int]
+        ] = set()
+
+        cold_start_function_ids: set[int] = set()
+
+        cold_start_count = 0
+        warm_hit_count = 0
+
+        for function_id, node_id in zip(
+            self.sfc.function_ids,
+            placement_node_ids,
+        ):
+            function = self.function_map[function_id]
+
+            instance = self._get_or_create_instance(
+                node_id=node_id,
+                function_id=function_id,
+            )
+
+            lifecycle_result = (
+                self.lifecycle_manager.process_slot(
+                    instance=instance,
+                    function=function,
+                    request_count=request_count,
+                    keep_warm=False,
+                )
+            )
+
+            instance_key = (
+                node_id,
+                function_id,
+            )
+
+            used_instance_keys.add(instance_key)
+
+            if lifecycle_result.cold_start_occurred:
+                cold_start_function_ids.add(
+                    function_id
+                )
+
+                cold_start_count += 1
+
+            if lifecycle_result.warm_hit:
+                warm_hit_count += 1
+
+        return (
+            used_instance_keys,
+            cold_start_function_ids,
+            cold_start_count,
+            warm_hit_count,
+        )
+
+    def _age_unused_instances(
+        self,
+        used_instance_keys: set[tuple[int, int]],
+    ) -> int:
+        """
+        更新当前时隙没有被请求使用的旧容器。
+
+        这些容器的 idle_slots 会增加，
+        达到生存窗口后会被销毁。
+
+        Returns
+        -------
+        int:
+            当前时隙被销毁的容器数量。
+        """
+
+        expiration_count = 0
+
+        for instance_key, instance in (
+            self.instances.items()
+        ):
+            # 当前时隙已经被真实请求使用的实例，
+            # 不需要再次更新。
+            if instance_key in used_instance_keys:
+                continue
+
+            function = self.function_map[
+                instance.function_id
+            ]
+
+            lifecycle_result = (
+                self.lifecycle_manager.process_slot(
+                    instance=instance,
+                    function=function,
+                    request_count=0,
+                    keep_warm=False,
+                )
+            )
+
+            if lifecycle_result.expired:
+                expiration_count += 1
+
+        return expiration_count
+
+    def run(self) -> SimulationRunResult:
+        """
+        从线路起点运行到线路终点。
+
+        Returns
+        -------
+        SimulationRunResult:
+            包含逐时隙记录和汇总指标。
+        """
+
+        # 每次重新运行实验时，
+        # 清除上一次实验留下的容器状态。
+        self.instances.clear()
+
+        # 将列车恢复到线路起点。
+        train_state = self.mobility_model.reset()
+
+        records: list[SlotSimulationRecord] = []
+
+        previous_serving_mec: int | None = None
+
+        while True:
+            # 判断当前时隙是否发生 MEC 切换。
+            handover_occurred = (
+                previous_serving_mec is not None
+                and train_state.serving_mec
+                != previous_serving_mec
+            )
+
+            # 查询当前时隙的请求数量。
+            request_count = (
+                self.workload.request_count(
+                    train_state.time_slot
+                )
+            )
+
+            # 根据部署策略确定每个函数所在 MEC。
+            placement_node_ids = (
+                self.placement_policy.place_functions(
+                    sfc=self.sfc,
+                    train_state=train_state,
+                    topology=self.topology,
+                )
+            )
+
+            used_instance_keys: set[
+                tuple[int, int]
+            ] = set()
+
+            cold_start_count = 0
+            warm_hit_count = 0
+
+            transmission_delay_ms = 0.0
+            cold_start_delay_ms = 0.0
+            execution_delay_ms = 0.0
+            end_to_end_delay_ms = 0.0
+            deadline_met: bool | None = None
+
+            # 当前时隙存在真实请求。
+            if request_count > 0:
+                (
+                    used_instance_keys,
+                    cold_start_function_ids,
+                    cold_start_count,
+                    warm_hit_count,
+                ) = self._process_active_request_batch(
+                    placement_node_ids=(
+                        placement_node_ids
+                    ),
+                    request_count=request_count,
+                )
+
+                sfc_result = execute_sfc_batch(
+                    functions=self.functions,
+                    sfc=self.sfc,
+                    placement_node_ids=(
+                        placement_node_ids
+                    ),
+                    source_node_id=(
+                        train_state.serving_mec
+                    ),
+                    input_size_mb_per_request=(
+                        self.input_size_mb_per_request
+                    ),
+                    request_count=request_count,
+                    network=self.network,
+                    cold_start_function_ids=(
+                        cold_start_function_ids
+                    ),
+                    return_result_to_source=(
+                        self.return_result_to_source
+                    ),
+                )
+
+                transmission_delay_ms = (
+                    sfc_result
+                    .total_transmission_delay_ms
+                )
+
+                cold_start_delay_ms = (
+                    sfc_result
+                    .total_cold_start_delay_ms
+                )
+
+                execution_delay_ms = (
+                    sfc_result
+                    .total_execution_delay_ms
+                )
+
+                end_to_end_delay_ms = (
+                    sfc_result
+                    .total_end_to_end_delay_ms
+                )
+
+                deadline_met = (
+                    sfc_result.deadline_met
+                )
+
+            # 当前请求没有使用的旧容器，
+            # 需要累计空闲时隙。
+            expiration_count = (
+                self._age_unused_instances(
+                    used_instance_keys=(
+                        used_instance_keys
+                    )
+                )
+            )
+
+            records.append(
+                SlotSimulationRecord(
+                    time_slot=train_state.time_slot,
+                    position_m=train_state.position_m,
+                    serving_mec=(
+                        train_state.serving_mec
+                    ),
+                    next_mec=train_state.next_mec,
+                    handover_occurred=(
+                        handover_occurred
+                    ),
+                    request_count=request_count,
+                    placement_node_ids=tuple(
+                        placement_node_ids
+                    ),
+                    cold_start_count=(
+                        cold_start_count
+                    ),
+                    warm_hit_count=warm_hit_count,
+                    expiration_count=(
+                        expiration_count
+                    ),
+                    transmission_delay_ms=(
+                        transmission_delay_ms
+                    ),
+                    cold_start_delay_ms=(
+                        cold_start_delay_ms
+                    ),
+                    execution_delay_ms=(
+                        execution_delay_ms
+                    ),
+                    end_to_end_delay_ms=(
+                        end_to_end_delay_ms
+                    ),
+                    deadline_met=deadline_met,
+                )
+            )
+
+            # 列车到达线路终点后结束实验。
+            if self.mobility_model.finished:
+                break
+
+            # 保存当前接入 MEC，
+            # 下一时隙用于判断是否发生切换。
+            previous_serving_mec = (
+                train_state.serving_mec
+            )
+
+            # 列车向前移动一个快时隙。
+            train_state = (
+                self.mobility_model.step()
+            )
+
+        summary = self._build_summary(records)
+
+        return SimulationRunResult(
+            summary=summary,
+            records=tuple(records),
+        )
+
+    def _build_summary(
+        self,
+        records: list[SlotSimulationRecord],
+    ) -> SimulationSummary:
+        """
+        根据逐时隙记录生成汇总指标。
+        """
+
+        active_records = [
+            record
+            for record in records
+            if record.request_count > 0
+        ]
+
+        total_requests = sum(
+            record.request_count
+            for record in records
+        )
+
+        request_batches = len(active_records)
+
+        handover_count = sum(
+            int(record.handover_occurred)
+            for record in records
+        )
+
+        user_cold_starts = sum(
+            record.cold_start_count
+            for record in records
+        )
+
+        warm_hits = sum(
+            record.warm_hit_count
+            for record in records
+        )
+
+        expiration_count = sum(
+            record.expiration_count
+            for record in records
+        )
+
+        deadline_violations = sum(
+            int(record.deadline_met is False)
+            for record in active_records
+        )
+
+        total_function_stages = (
+            request_batches
+            * len(self.sfc.function_ids)
+        )
+
+        if total_function_stages > 0:
+            function_stage_cold_start_rate = (
+                user_cold_starts
+                / total_function_stages
+            )
+        else:
+            function_stage_cold_start_rate = 0.0
+
+        if request_batches > 0:
+            deadline_violation_rate = (
+                deadline_violations
+                / request_batches
+            )
+
+            delays = [
+                record.end_to_end_delay_ms
+                for record in active_records
+            ]
+
+            average_batch_delay_ms = float(
+                np.mean(delays)
+            )
+
+            p95_batch_delay_ms = float(
+                np.percentile(delays, 95)
+            )
+        else:
+            deadline_violation_rate = 0.0
+            average_batch_delay_ms = 0.0
+            p95_batch_delay_ms = 0.0
+
+        return SimulationSummary(
+            total_slots=len(records),
+            total_requests=total_requests,
+            request_batches=request_batches,
+            handover_count=handover_count,
+            user_cold_starts=user_cold_starts,
+            warm_hits=warm_hits,
+            expiration_count=expiration_count,
+            deadline_violations=(
+                deadline_violations
+            ),
+            function_stage_cold_start_rate=(
+                function_stage_cold_start_rate
+            ),
+            deadline_violation_rate=(
+                deadline_violation_rate
+            ),
+            average_batch_delay_ms=(
+                average_batch_delay_ms
+            ),
+            p95_batch_delay_ms=(
+                p95_batch_delay_ms
+            ),
+        )

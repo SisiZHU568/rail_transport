@@ -1,0 +1,6 @@
+﻿scenario,policy_id,user_cold_starts,prewarm_starts,prewarm_hits,prewarm_wastes,unresolved_prewarms,prewarm_hit_rate,prewarm_waste_rate,deadline_violations,average_batch_delay_ms,p95_batch_delay_ms,average_warm_memory_mb,peak_warm_memory_mb,total_delay_cost,total_retention_cost,total_prewarm_cost,total_system_cost
+reactive,no_prewarming,15,0,0,0,0,0.0,0.0,5,288.62068965517244,1695.0,1680.4102564102564,3072.0,16740.0,1966.08,0.0,18706.08
+perfect,trajectory_aware_perfect,3,12,12,0,0,1.0,0.0,1,178.27586206896552,285.0,1864.2051282051282,3072.0,10340.0,2181.12,1280.0,13801.119999999999
+early,trajectory_aware_biased_time_-4_hop_0,3,12,12,0,0,1.0,0.0,1,178.27586206896552,285.0,2074.25641025641,3072.0,10340.0,2426.88,1280.0,14046.880000000001
+late,trajectory_aware_biased_time_4_hop_0,15,0,0,0,0,0.0,0.0,5,288.62068965517244,1695.0,1680.4102564102564,3072.0,16740.0,1966.08,0.0,18706.08
+wrong_target,trajectory_aware_biased_time_0_hop_1,15,9,0,9,0,0.0,1.0,5,288.62068965517244,1695.0,1956.1025641025642,4608.0,16740.0,2288.64,960.0,19988.64

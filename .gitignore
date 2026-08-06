@@ -1,0 +1,24 @@
+# Python 自动生成的缓存
+__pycache__/
+*.py[cod]
+
+# pytest 缓存
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# IDE 配置
+.idea/
+
+# 实验输出
+results/logs/
+results/models/
+
+# TensorBoard 日志
+runs/
+
+# 临时文件
+*.tmp
+*.log

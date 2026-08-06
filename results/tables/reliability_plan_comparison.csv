@@ -1,0 +1,4 @@
+﻿scenario,replica_node_ids,fault_domain_ids,function_availability,approximate_stage_product_availability,exact_shared_failure_availability,reliability_target,fault_domain_diversity_met,target_met
+single_replica,[0],[0],0.9751,0.927144591751,0.9751,0.99,False,False
+same_domain_replicas,"[0, 1]",[0],0.994602,0.9838932579228952,0.994602,0.99,False,False
+cross_domain_replicas,"[0, 2]","[0, 1]",0.99937999,0.9981411229988608,0.99937999,0.99,True,True

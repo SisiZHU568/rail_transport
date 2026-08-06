@@ -1,0 +1,10 @@
+﻿scenario,order_index,function_id,function_name,previous_node_id,node_id,input_size_mb,transmission_delay_ms,cold_start_delay_ms,execution_delay_ms,output_size_mb,stage_total_delay_ms
+local_warm,0,0,数据清洗,0,0,2.0,0.0,0.0,15.0,1.4,15.0
+local_warm,1,1,特征提取,0,0,1.4,0.0,0.0,30.0,0.5599999999999999,30.0
+local_warm,2,2,异常检测,0,0,0.5599999999999999,0.0,0.0,50.0,0.055999999999999994,50.0
+distributed_warm,0,0,数据清洗,0,0,2.0,0.0,0.0,15.0,1.4,15.0
+distributed_warm,1,1,特征提取,0,1,1.4,13.2,0.0,30.0,0.5599999999999999,43.2
+distributed_warm,2,2,异常检测,1,2,0.5599999999999999,6.4799999999999995,0.0,50.0,0.055999999999999994,56.48
+distributed_all_cold,0,0,数据清洗,0,0,2.0,0.0,300.0,15.0,1.4,315.0
+distributed_all_cold,1,1,特征提取,0,1,1.4,13.2,500.0,30.0,0.5599999999999999,543.2
+distributed_all_cold,2,2,异常检测,1,2,0.5599999999999999,6.4799999999999995,800.0,50.0,0.055999999999999994,856.48

@@ -1,0 +1,7 @@
+﻿policy_name,total_decisions,single_count,cold_count,hot_count,dynamic_count,single_ratio,cold_ratio,hot_ratio,dynamic_ratio
+Fixed-SINGLE,650,650,0,0,0,1.0,0.0,0.0,0.0
+Fixed-COLD,650,0,650,0,0,0.0,1.0,0.0,0.0
+Fixed-HOT,650,0,0,650,0,0.0,0.0,1.0,0.0
+Fixed-DYNAMIC,650,0,0,0,650,0.0,0.0,0.0,1.0
+Rule-Based,650,0,0,200,450,0.0,0.0,0.3076923076923077,0.6923076923076923
+Double-DQN,650,0,374,106,170,0.0,0.5753846153846154,0.16307692307692306,0.26153846153846155

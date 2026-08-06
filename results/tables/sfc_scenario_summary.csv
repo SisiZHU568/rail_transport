@@ -1,0 +1,4 @@
+﻿scenario,placement_node_ids,transmission_delay_ms,cold_start_delay_ms,execution_delay_ms,end_to_end_delay_ms,deadline_ms,deadline_met,final_output_size_mb
+local_warm,"[0, 0, 0]",0.0,0.0,95.0,95.0,1500.0,True,0.055999999999999994
+distributed_warm,"[0, 1, 2]",24.128,0.0,95.0,119.128,1500.0,True,0.055999999999999994
+distributed_all_cold,"[0, 1, 2]",24.128,1600.0,95.0,1719.128,1500.0,False,0.055999999999999994

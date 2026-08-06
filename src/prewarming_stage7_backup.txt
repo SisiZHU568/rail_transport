@@ -1,0 +1,178 @@
+"""
+prewarming.py
+
+本文件定义 Serverless 函数提前预热策略。
+
+提前预热的基本思想是：
+
+1. 根据列车当前位置、速度和剩余驻留时间，
+   判断列车是否即将切换到下一轨旁 MEC；
+
+2. 在切换发生之前，
+   提前在下一 MEC 启动 SFC 所需的函数容器；
+
+3. 列车切换后，请求可以直接命中温实例，
+   从而避免用户承担冷启动时延。
+
+当前实现两种策略：
+
+1. NoPrewarmingPolicy：
+   不进行提前预热，作为被动响应式基线。
+
+2. TrajectoryAwarePrewarmingPolicy：
+   根据剩余驻留时间提前预热下一 MEC。
+"""
+
+from abc import ABC, abstractmethod
+
+from src.entities import SFCType, TrainState
+from src.topology import LinearRailTopology
+
+
+class PrewarmingPolicy(ABC):
+    """
+    提前预热策略的抽象基类。
+
+    所有预热策略都需要回答一个问题：
+
+        当前时隙应该在哪些 MEC 上预热函数？
+    """
+
+    def __init__(
+        self,
+        policy_id: str,
+        display_name: str,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        policy_id:
+            策略英文编号，用于 CSV 和绘图。
+
+        display_name:
+            策略显示名称，用于终端输出。
+        """
+
+        if not policy_id:
+            raise ValueError("policy_id 不能为空。")
+
+        if not display_name:
+            raise ValueError("display_name 不能为空。")
+
+        self.policy_id = policy_id
+        self.display_name = display_name
+
+    @abstractmethod
+    def target_node_ids(
+        self,
+        train_state: TrainState,
+        sfc: SFCType,
+        topology: LinearRailTopology,
+    ) -> list[int]:
+        """
+        返回当前时隙需要进行预热的 MEC 节点编号。
+
+        Returns
+        -------
+        list[int]:
+            需要预热的 MEC 节点编号列表。
+
+            返回空列表表示当前时隙不进行预热。
+        """
+
+        raise NotImplementedError
+
+
+class NoPrewarmingPolicy(PrewarmingPolicy):
+    """
+    不进行提前预热的基线策略。
+
+    该策略只有在真实请求到达时才启动函数容器。
+    因此列车进入新 MEC 后，第一个请求容易产生冷启动。
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            policy_id="no_prewarming",
+            display_name="被动响应式",
+        )
+
+    def target_node_ids(
+        self,
+        train_state: TrainState,
+        sfc: SFCType,
+        topology: LinearRailTopology,
+    ) -> list[int]:
+        """
+        永远返回空列表，表示不进行主动预热。
+        """
+
+        return []
+
+
+class TrajectoryAwarePrewarmingPolicy(PrewarmingPolicy):
+    """
+    轨迹感知提前预热策略。
+
+    当列车在当前 MEC 覆盖区中的剩余驻留时间
+    小于或等于 lead_time_s 时，
+    在下一 MEC 上提前预热整条 SFC。
+
+    例如：
+
+        lead_time_s = 3秒
+        剩余驻留时间 = 2.4秒
+
+    此时应开始预热下一 MEC。
+    """
+
+    def __init__(self, lead_time_s: float) -> None:
+        """
+        Parameters
+        ----------
+        lead_time_s:
+            提前预热时间阈值，单位为秒。
+        """
+
+        if lead_time_s <= 0:
+            raise ValueError(
+                "提前预热时间阈值必须大于 0。"
+            )
+
+        super().__init__(
+            policy_id="trajectory_aware",
+            display_name=f"轨迹感知预热({lead_time_s:g}s)",
+        )
+
+        self.lead_time_s = lead_time_s
+
+    def target_node_ids(
+        self,
+        train_state: TrainState,
+        sfc: SFCType,
+        topology: LinearRailTopology,
+    ) -> list[int]:
+        """
+        根据剩余驻留时间决定是否预热下一 MEC。
+        """
+
+        # 在最后一个 MEC 中，
+        # TrainState 会令 next_mec 等于 serving_mec。
+        #
+        # 这表示已经没有后续 MEC，
+        # 因此不需要继续预热。
+        if train_state.next_mec == train_state.serving_mec:
+            return []
+
+        # 检查下一 MEC 是否确实存在于铁路拓扑中。
+        topology.get_site(train_state.next_mec)
+
+        # 当剩余驻留时间小于或等于预热阈值时，
+        # 返回下一 MEC 的节点编号。
+        if (
+            train_state.remaining_dwell_time_s
+            <= self.lead_time_s
+        ):
+            return [train_state.next_mec]
+
+        return []

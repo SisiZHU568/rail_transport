@@ -1,0 +1,5 @@
+﻿scenario,total_requests,successful_requests,failed_requests,request_success_rate,failover_batches,hot_failover_function_stages,cold_failover_function_stages,total_failover_delay_ms,total_cold_backup_startup_delay_ms,deadline_violations,sla_violations,sla_violation_rate,average_successful_batch_delay_ms,p95_successful_batch_delay_ms,average_active_memory_mb,peak_active_memory_mb,total_active_memory_mb_seconds
+single_replica,92,84,8,0.9130434782608695,0,0,0,0.0,0.0,0,5,0.08620689655172414,150.56603773584905,285.0,1536.0,1536.0,179712.0
+cross_domain_cold_standby,92,92,0,1.0,5,0,15,300.0,8000.0,5,5,0.08620689655172414,296.4066206896552,1775.448,1601.6410256410256,3072.0,187392.0
+cross_domain_hot_standby,92,92,0,1.0,5,15,0,300.0,0.0,0,0,0.0,158.47558620689654,285.0,3072.0,3072.0,359424.0
+trajectory_aware_dynamic,92,92,0,1.0,5,3,12,300.0,6400.0,4,4,0.06896551724137931,268.82041379310346,1775.448,1746.051282051282,3072.0,204288.0
