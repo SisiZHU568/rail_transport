@@ -261,7 +261,7 @@ class FastTimescaleDecision:
         从主实例切换到备用实例的函数。
 
     cold_start_function_ids:
-        备用实例接管时仍为冷状态，
+        备用接管或修复迁移后的执行节点原来不是温实例，
         因而需要冷启动的函数。
 
     unavailable_function_ids:
@@ -333,6 +333,10 @@ def build_fast_decision_for_plan(
             hot_node_ids = (primary_node_id,)
 
         function_hot_node_ids[function_id] = hot_node_ids
+
+        # 修复后新建但不在本次执行路径上的HOT备用实例仍计入内存；
+        # 当前阶段暂不把这类后台启动开销叠加到用户端到端时延，
+        # 后续接入完整实例生命周期模型时再细化该部分成本。
 
         # 没有请求时只维护实例温热状态，不构造执行路径。
         if state.request_count == 0:

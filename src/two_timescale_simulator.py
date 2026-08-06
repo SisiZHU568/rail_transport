@@ -1132,19 +1132,19 @@ class TwoTimescaleRuntimeSimulator:
             else 0.0
         )
 
-        # 汇总指标面向真实请求批次；无请求时隙中的后台部署维护
-        # 仍保留在逐时隙记录中，但不与业务修复成功率混合统计。
+        # 修复统计覆盖全部快时隙，包括无请求时的后台部署维护；
+        # 约束拒绝批次数在下方单独限制为真实请求批次。
         fast_repair_attempts = sum(
             int(record.fast_repair_attempted)
-            for record in active_records
+            for record in records
         )
         fast_repair_successes = sum(
             int(record.fast_repair_succeeded is True)
-            for record in active_records
+            for record in records
         )
         fast_repair_failures = sum(
             int(record.fast_repair_succeeded is False)
-            for record in active_records
+            for record in records
         )
         fast_repair_success_rate = (
             fast_repair_successes

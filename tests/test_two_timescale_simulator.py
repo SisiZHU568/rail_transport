@@ -350,7 +350,7 @@ def test_slot_record_contains_resource_and_reliability_audit() -> None:
 
 
 def test_single_replica_reliability_violation_is_recorded() -> None:
-    """单副本可靠性不足时应记录原因，但不改变原执行逻辑。"""
+    """单副本可靠性不足时应保存原因，解释后续修复失败。"""
 
     controller = FixedModeTwoTimescaleController(
         standby_mode=StandbyMode.SINGLE,
@@ -493,9 +493,11 @@ def test_summary_counts_repairs_and_constraint_rejections() -> None:
 
     summary = result.summary
 
-    assert summary.fast_repair_attempts == 1
+    # 单副本部署在整条线路的每个时隙都无法满足双故障域要求，
+    # 因此后台部署修复次数应覆盖全部时隙，而非只统计请求时隙。
+    assert summary.fast_repair_attempts == summary.total_slots
     assert summary.fast_repair_successes == 0
-    assert summary.fast_repair_failures == 1
+    assert summary.fast_repair_failures == summary.total_slots
     assert summary.fast_repair_success_rate == 0.0
     assert summary.constraint_rejected_batches == 1
     assert summary.failed_batches == 1
