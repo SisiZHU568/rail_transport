@@ -19,6 +19,7 @@ from src.two_timescale_control import (
     SlowTimescaleDecision,
     SlowTimescaleState,
     StandbyMode,
+    build_fast_decision_for_plan,
 )
 
 
@@ -113,6 +114,31 @@ def build_slow_decision(
         standby_mode=standby_mode,
         reason="测试动作",
     )
+
+
+def test_repaired_primary_that_was_not_hot_requires_cold_start() -> None:
+    """修复器迁移主节点后，新节点未预热时必须计入冷启动。"""
+
+    state = FastTimescaleState(
+        time_slot=1,
+        serving_mec=0,
+        remaining_dwell_time_s=10.0,
+        request_count=1,
+        function_ids=(0,),
+        candidate_node_ids={0: (1,)},
+        operational_node_ids=frozenset({0, 1}),
+    )
+
+    decision = build_fast_decision_for_plan(
+        state=state,
+        standby_mode=StandbyMode.SINGLE,
+        backup_activation_triggered=False,
+        previously_hot_node_ids={0: (0,)},
+    )
+
+    assert decision.selected_execution_node_ids == (1,)
+    assert decision.cold_start_function_ids == (0,)
+    assert decision.request_success is True
 
 
 def test_invalid_slow_period_is_rejected() -> None:

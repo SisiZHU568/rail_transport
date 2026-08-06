@@ -289,6 +289,115 @@ class FastTimescaleDecision:
     request_success: bool | None
 
 
+def build_fast_decision_for_plan(
+    state: FastTimescaleState,
+    standby_mode: StandbyMode,
+    backup_activation_triggered: bool,
+    previously_hot_node_ids: (
+        dict[int, tuple[int, ...]] | None
+    ) = None,
+) -> FastTimescaleDecision:
+    """根据给定副本方案生成无副作用的快层路由结果。"""
+
+    function_hot_node_ids: dict[
+        int,
+        tuple[int, ...],
+    ] = {}
+    selected_execution_node_ids: list[int] = []
+    failover_function_ids: list[int] = []
+    cold_start_function_ids: list[int] = []
+    unavailable_function_ids: list[int] = []
+
+    for function_id in state.function_ids:
+        all_candidate_nodes = state.candidate_node_ids[
+            function_id
+        ]
+
+        # 单副本模式只允许使用计划中的第一个节点；
+        # 冷备和热备模式可以在主节点故障时依次选择备用节点。
+        usable_candidate_nodes = (
+            (all_candidate_nodes[0],)
+            if standby_mode is StandbyMode.SINGLE
+            else all_candidate_nodes
+        )
+        primary_node_id = usable_candidate_nodes[0]
+
+        # HOT模式或切换窗口已经触发备用激活时，
+        # 计划中的全部可用副本都占用活动实例内存。
+        if (
+            standby_mode is StandbyMode.HOT
+            or backup_activation_triggered
+        ):
+            hot_node_ids = tuple(usable_candidate_nodes)
+        else:
+            hot_node_ids = (primary_node_id,)
+
+        function_hot_node_ids[function_id] = hot_node_ids
+
+        # 没有请求时只维护实例温热状态，不构造执行路径。
+        if state.request_count == 0:
+            continue
+
+        operational_candidates = [
+            node_id
+            for node_id in usable_candidate_nodes
+            if node_id in state.operational_node_ids
+        ]
+
+        if not operational_candidates:
+            unavailable_function_ids.append(function_id)
+            continue
+
+        selected_node_id = operational_candidates[0]
+        selected_execution_node_ids.append(selected_node_id)
+
+        if selected_node_id != primary_node_id:
+            failover_function_ids.append(function_id)
+
+        # 普通控制器依据当前计划判断温实例；修复器需要传入修复前
+        # 真实温实例，避免把刚迁移的新节点错误地当成已经预热。
+        known_hot_node_ids = (
+            hot_node_ids
+            if previously_hot_node_ids is None
+            else previously_hot_node_ids.get(
+                function_id,
+                (),
+            )
+        )
+        if selected_node_id not in known_hot_node_ids:
+            cold_start_function_ids.append(function_id)
+
+    if state.request_count == 0:
+        request_success: bool | None = None
+    elif unavailable_function_ids:
+        request_success = False
+
+        # 任一函数无可用副本时，整条SFC路径不完整，不能部分执行。
+        selected_execution_node_ids = []
+    else:
+        request_success = True
+
+    return FastTimescaleDecision(
+        function_hot_node_ids=function_hot_node_ids,
+        selected_execution_node_ids=tuple(
+            selected_execution_node_ids
+        ),
+        backup_activation_triggered=(
+            backup_activation_triggered
+        ),
+        failover_function_ids=tuple(
+            failover_function_ids
+        ),
+        cold_start_function_ids=tuple(
+            cold_start_function_ids
+        ),
+        unavailable_function_ids=tuple(
+            unavailable_function_ids
+        ),
+        request_success=request_success,
+    )
+
+
 class RuleBasedTwoTimescaleController:
     """
     规则式双时间尺度控制器。
@@ -523,17 +632,6 @@ class RuleBasedTwoTimescaleController:
         生成快时间尺度决策。
         """
 
-        function_hot_node_ids: dict[
-            int,
-            tuple[int, ...],
-        ] = {}
-
-        selected_execution_node_ids: list[int] = []
-
-        failover_function_ids: list[int] = []
-        cold_start_function_ids: list[int] = []
-        unavailable_function_ids: list[int] = []
-
         # 冷备模式在接近MEC切换时，
         # 由快时间尺度临时激活备用实例。
         near_handover = (
@@ -548,126 +646,12 @@ class RuleBasedTwoTimescaleController:
             and slow_decision.use_redundancy
         )
 
-        for function_id in state.function_ids:
-            all_candidate_nodes = (
-                state.candidate_node_ids[
-                    function_id
-                ]
-            )
-
-            # 慢时间尺度选择单副本时，
-            # 即使外部候选计划中存在备用节点，
-            # 快时间尺度也只允许使用主节点。
-            if (
-                slow_decision.standby_mode
-                is StandbyMode.SINGLE
-            ):
-                usable_candidate_nodes = (
-                    all_candidate_nodes[0],
-                )
-            else:
-                usable_candidate_nodes = (
-                    all_candidate_nodes
-                )
-
-            primary_node_id = (
-                usable_candidate_nodes[0]
-            )
-
-            # 确定哪些副本处于温状态。
-            if (
-                slow_decision.standby_mode
-                is StandbyMode.HOT
-            ):
-                hot_node_ids = (
-                    usable_candidate_nodes
-                )
-
-            elif backup_activation_triggered:
-                hot_node_ids = (
-                    usable_candidate_nodes
-                )
-
-            else:
-                hot_node_ids = (
-                    primary_node_id,
-                )
-
-            function_hot_node_ids[
-                function_id
-            ] = hot_node_ids
-
-            # 当前时隙没有请求时，
-            # 只进行备用激活，不进行执行路由。
-            if state.request_count == 0:
-                continue
-
-            operational_candidates = [
-                node_id
-                for node_id in usable_candidate_nodes
-                if node_id
-                in state.operational_node_ids
-            ]
-
-            if not operational_candidates:
-                unavailable_function_ids.append(
-                    function_id
-                )
-                continue
-
-            selected_node_id = (
-                operational_candidates[0]
-            )
-
-            selected_execution_node_ids.append(
-                selected_node_id
-            )
-
-            if selected_node_id != primary_node_id:
-                failover_function_ids.append(
-                    function_id
-                )
-
-                # 备用节点未处于温状态时，
-                # 本次接管需要进行冷启动。
-                if selected_node_id not in hot_node_ids:
-                    cold_start_function_ids.append(
-                        function_id
-                    )
-
-        if state.request_count == 0:
-            request_success: bool | None = None
-
-        elif unavailable_function_ids:
-            request_success = False
-
-            # 整条SFC无法完成，
-            # 清空不完整的执行路径。
-            selected_execution_node_ids = []
-
-        else:
-            request_success = True
-
-        return FastTimescaleDecision(
-            function_hot_node_ids=(
-                function_hot_node_ids
-            ),
-            selected_execution_node_ids=tuple(
-                selected_execution_node_ids
-            ),
+        return build_fast_decision_for_plan(
+            state=state,
+            standby_mode=slow_decision.standby_mode,
             backup_activation_triggered=(
                 backup_activation_triggered
             ),
-            failover_function_ids=tuple(
-                failover_function_ids
-            ),
-            cold_start_function_ids=tuple(
-                cold_start_function_ids
-            ),
-            unavailable_function_ids=tuple(
-                unavailable_function_ids
-            ),
-            request_success=request_success,
         )
 
 
@@ -835,17 +819,6 @@ class FixedModeTwoTimescaleController:
         根据固定主备模式执行快时间尺度路由。
         """
 
-        function_hot_node_ids: dict[
-            int,
-            tuple[int, ...],
-        ] = {}
-
-        selected_execution_node_ids: list[int] = []
-
-        failover_function_ids: list[int] = []
-        cold_start_function_ids: list[int] = []
-        unavailable_function_ids: list[int] = []
-
         near_handover = (
             state.remaining_dwell_time_s
             <= self.handover_hot_window_s
@@ -857,103 +830,10 @@ class FixedModeTwoTimescaleController:
             and near_handover
         )
 
-        for function_id in state.function_ids:
-            all_candidate_nodes = (
-                state.candidate_node_ids[
-                    function_id
-                ]
-            )
-
-            if self.standby_mode is StandbyMode.SINGLE:
-                usable_candidate_nodes = (
-                    all_candidate_nodes[0],
-                )
-            else:
-                usable_candidate_nodes = (
-                    all_candidate_nodes
-                )
-
-            primary_node_id = (
-                usable_candidate_nodes[0]
-            )
-
-            if self.standby_mode is StandbyMode.HOT:
-                hot_node_ids = usable_candidate_nodes
-
-            elif backup_activation_triggered:
-                hot_node_ids = usable_candidate_nodes
-
-            else:
-                hot_node_ids = (
-                    primary_node_id,
-                )
-
-            function_hot_node_ids[
-                function_id
-            ] = tuple(hot_node_ids)
-
-            if state.request_count == 0:
-                continue
-
-            operational_candidates = [
-                node_id
-                for node_id in usable_candidate_nodes
-                if node_id
-                in state.operational_node_ids
-            ]
-
-            if not operational_candidates:
-                unavailable_function_ids.append(
-                    function_id
-                )
-                continue
-
-            selected_node_id = (
-                operational_candidates[0]
-            )
-
-            selected_execution_node_ids.append(
-                selected_node_id
-            )
-
-            if selected_node_id != primary_node_id:
-                failover_function_ids.append(
-                    function_id
-                )
-
-                if selected_node_id not in hot_node_ids:
-                    cold_start_function_ids.append(
-                        function_id
-                    )
-
-        if state.request_count == 0:
-            request_success: bool | None = None
-
-        elif unavailable_function_ids:
-            request_success = False
-            selected_execution_node_ids = []
-
-        else:
-            request_success = True
-
-        return FastTimescaleDecision(
-            function_hot_node_ids=(
-                function_hot_node_ids
-            ),
-            selected_execution_node_ids=tuple(
-                selected_execution_node_ids
-            ),
+        return build_fast_decision_for_plan(
+            state=state,
+            standby_mode=self.standby_mode,
             backup_activation_triggered=(
                 backup_activation_triggered
             ),
-            failover_function_ids=tuple(
-                failover_function_ids
-            ),
-            cold_start_function_ids=tuple(
-                cold_start_function_ids
-            ),
-            unavailable_function_ids=tuple(
-                unavailable_function_ids
-            ),
-            request_success=request_success,
         )
