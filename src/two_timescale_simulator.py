@@ -249,6 +249,12 @@ class TwoTimescaleSummary:
     sla_violations: int
     sla_violation_rate: float
 
+    fast_repair_attempts: int
+    fast_repair_successes: int
+    fast_repair_failures: int
+    fast_repair_success_rate: float
+    constraint_rejected_batches: int
+
     average_successful_batch_delay_ms: float
     p95_successful_batch_delay_ms: float
 
@@ -1126,6 +1132,37 @@ class TwoTimescaleRuntimeSimulator:
             else 0.0
         )
 
+        # 汇总指标面向真实请求批次；无请求时隙中的后台部署维护
+        # 仍保留在逐时隙记录中，但不与业务修复成功率混合统计。
+        fast_repair_attempts = sum(
+            int(record.fast_repair_attempted)
+            for record in active_records
+        )
+        fast_repair_successes = sum(
+            int(record.fast_repair_succeeded is True)
+            for record in active_records
+        )
+        fast_repair_failures = sum(
+            int(record.fast_repair_succeeded is False)
+            for record in active_records
+        )
+        fast_repair_success_rate = (
+            fast_repair_successes
+            / fast_repair_attempts
+            if fast_repair_attempts > 0
+            else 0.0
+        )
+
+        # 只统计有真实请求且因硬约束无解而被拒绝的批次；
+        # 该批次已包含在failed_batches中，不额外增加SLA违反数。
+        constraint_rejected_batches = sum(
+            int(
+                record.request_count > 0
+                and record.fast_repair_succeeded is False
+            )
+            for record in records
+        )
+
         successful_delays = [
             record.end_to_end_delay_ms
             for record in successful_records
@@ -1274,6 +1311,21 @@ class TwoTimescaleRuntimeSimulator:
             sla_violations=sla_violations,
             sla_violation_rate=(
                 sla_violation_rate
+            ),
+            fast_repair_attempts=(
+                fast_repair_attempts
+            ),
+            fast_repair_successes=(
+                fast_repair_successes
+            ),
+            fast_repair_failures=(
+                fast_repair_failures
+            ),
+            fast_repair_success_rate=(
+                fast_repair_success_rate
+            ),
+            constraint_rejected_batches=(
+                constraint_rejected_batches
             ),
             average_successful_batch_delay_ms=(
                 average_delay

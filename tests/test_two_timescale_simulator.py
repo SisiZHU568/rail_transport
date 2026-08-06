@@ -475,3 +475,28 @@ def test_unrepairable_no_request_slot_is_not_counted_as_request_failure() -> Non
     assert record.fast_repair_succeeded is False
     assert record.request_success is None
     assert result.summary.failed_batches == 0
+
+
+def test_summary_counts_repairs_and_constraint_rejections() -> None:
+    """修复失败批次应被统计一次，并且只产生一次SLA惩罚。"""
+
+    controller = FixedModeTwoTimescaleController(
+        standby_mode=StandbyMode.SINGLE,
+        handover_hot_window_s=1.0,
+    )
+    result = build_test_simulator(
+        controller=controller,
+        risk=0.01,
+        request_trace=[1],
+        down_nodes_by_slot={},
+    ).run()
+
+    summary = result.summary
+
+    assert summary.fast_repair_attempts == 1
+    assert summary.fast_repair_successes == 0
+    assert summary.fast_repair_failures == 1
+    assert summary.fast_repair_success_rate == 0.0
+    assert summary.constraint_rejected_batches == 1
+    assert summary.failed_batches == 1
+    assert summary.sla_violations == 1

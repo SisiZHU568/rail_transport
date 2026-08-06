@@ -392,6 +392,16 @@ def print_scenario_summary(
     )
 
     print_metric(
+        "快层修复成功率",
+        summary.fast_repair_success_rate,
+    )
+
+    print_metric(
+        "约束拒绝批次数",
+        summary.constraint_rejected_batches,
+    )
+
+    print_metric(
         "成功批次平均时延",
         summary
         .average_successful_batch_delay_ms,
@@ -516,6 +526,12 @@ def save_summary_csv(
             ),
             "sla_violation_rate": (
                 summary.sla_violation_rate
+            ),
+            "fast_repair_success_rate": (
+                summary.fast_repair_success_rate
+            ),
+            "constraint_rejected_batches": (
+                summary.constraint_rejected_batches
             ),
             "average_delay_ms": (
                 summary

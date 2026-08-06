@@ -327,6 +327,26 @@ def print_result(
     )
 
     print(
+        f"  快层修复尝试次数："
+        f"{summary.fast_repair_attempts}"
+    )
+
+    print(
+        f"  快层修复成功次数："
+        f"{summary.fast_repair_successes}"
+    )
+
+    print(
+        f"  快层修复成功率："
+        f"{summary.fast_repair_success_rate:.6f}"
+    )
+
+    print(
+        f"  约束拒绝批次数："
+        f"{summary.constraint_rejected_batches}"
+    )
+
+    print(
         f"  故障接管批次数："
         f"{summary.failover_batches}"
     )
@@ -426,6 +446,7 @@ def print_two_timescale_events(
             or record.slow_mode_changed
             or record.backup_activation_triggered
             or len(record.failover_function_ids) > 0
+            or record.fast_repair_attempted
             or record.request_success is False
         )
 
@@ -493,6 +514,16 @@ def print_two_timescale_events(
             f"{record.request_success}"
         )
 
+        print(
+            f"  快层修复结果："
+            f"{record.fast_repair_succeeded}"
+        )
+
+        print(
+            f"  快层修复原因："
+            f"{record.fast_repair_reason}"
+        )
+
         if record.end_to_end_delay_ms is not None:
             print(
                 f"  端到端时延："
@@ -516,6 +547,11 @@ def save_summary_csv(
         "request_success_rate",
         "failed_requests",
         "sla_violation_rate",
+        "fast_repair_attempts",
+        "fast_repair_successes",
+        "fast_repair_failures",
+        "fast_repair_success_rate",
+        "constraint_rejected_batches",
         "failover_batches",
         "cold_start_function_stages",
         "total_cold_start_delay_ms",

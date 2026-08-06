@@ -72,6 +72,12 @@ class TwoTimescaleMonteCarloRunRecord:
     slow_decision_updates: int
     slow_mode_switches: int
 
+    fast_repair_attempts: int
+    fast_repair_successes: int
+    fast_repair_failures: int
+    fast_repair_success_rate: float
+    constraint_rejected_batches: int
+
     total_request_delay_cost: float
     total_memory_cost: float
     total_cold_start_cost: float
@@ -103,6 +109,12 @@ class TwoTimescaleMonteCarloScenarioSummary:
 
     slow_decision_updates: MetricSummary
     slow_mode_switches: MetricSummary
+
+    fast_repair_attempts: MetricSummary
+    fast_repair_successes: MetricSummary
+    fast_repair_failures: MetricSummary
+    fast_repair_success_rate: MetricSummary
+    constraint_rejected_batches: MetricSummary
 
     total_request_delay_cost: MetricSummary
     total_memory_cost: MetricSummary
@@ -232,6 +244,21 @@ def run_two_timescale_monte_carlo(
                     slow_mode_switches=(
                         summary.slow_mode_switches
                     ),
+                    fast_repair_attempts=(
+                        summary.fast_repair_attempts
+                    ),
+                    fast_repair_successes=(
+                        summary.fast_repair_successes
+                    ),
+                    fast_repair_failures=(
+                        summary.fast_repair_failures
+                    ),
+                    fast_repair_success_rate=(
+                        summary.fast_repair_success_rate
+                    ),
+                    constraint_rejected_batches=(
+                        summary.constraint_rejected_batches
+                    ),
                     total_request_delay_cost=(
                         summary.total_request_delay_cost
                     ),
@@ -325,6 +352,21 @@ def run_two_timescale_monte_carlo(
                 ),
                 slow_mode_switches=metric(
                     "slow_mode_switches"
+                ),
+                fast_repair_attempts=metric(
+                    "fast_repair_attempts"
+                ),
+                fast_repair_successes=metric(
+                    "fast_repair_successes"
+                ),
+                fast_repair_failures=metric(
+                    "fast_repair_failures"
+                ),
+                fast_repair_success_rate=metric(
+                    "fast_repair_success_rate"
+                ),
+                constraint_rejected_batches=metric(
+                    "constraint_rejected_batches"
                 ),
                 total_request_delay_cost=metric(
                     "total_request_delay_cost"

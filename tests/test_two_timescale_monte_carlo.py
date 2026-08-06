@@ -67,6 +67,13 @@ class FakeTwoTimescaleSimulator:
             slow_mode_switches=int(
                 value % 3
             ),
+            fast_repair_attempts=4,
+            fast_repair_successes=3,
+            fast_repair_failures=1,
+            fast_repair_success_rate=0.75,
+            constraint_rejected_batches=int(
+                value % 3
+            ),
             total_request_delay_cost=(
                 value + 50.0
             ),
@@ -166,6 +173,14 @@ def test_all_scenarios_receive_same_seeds() -> None:
 
     assert len(result.run_records) == 6
 
+    # 修复统计必须保留在每次实验的原始记录中。
+    assert result.run_records[0].fast_repair_attempts == 4
+    assert (
+        result.run_records[0]
+        .fast_repair_success_rate
+        == pytest.approx(0.75)
+    )
+
 
 def test_scenario_summaries_are_created() -> None:
     """
@@ -205,6 +220,13 @@ def test_scenario_summaries_are_created() -> None:
         >
         summary_a.total_system_cost.mean
     )
+
+    # 两个关键修复指标还必须进入每种方案的统计对象。
+    assert summary_a.fast_repair_success_rate.count == 3
+    assert summary_a.fast_repair_success_rate.mean == pytest.approx(
+        0.75
+    )
+    assert summary_a.constraint_rejected_batches.count == 3
 
 
 def test_summary_contains_confidence_interval() -> None:
