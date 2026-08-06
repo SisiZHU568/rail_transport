@@ -373,8 +373,8 @@ def test_single_replica_reliability_violation_is_recorded() -> None:
     )
 
 
-def test_same_node_load_is_accumulated_and_overload_is_recorded() -> None:
-    """同节点多函数的资源需求应累加并记录超限。"""
+def test_resource_overload_is_repaired_before_execution() -> None:
+    """资源超限方案必须先分散副本，再执行真实请求。"""
 
     functions = [
         ServerlessFunction(
@@ -400,7 +400,7 @@ def test_same_node_load_is_accumulated_and_overload_is_recorded() -> None:
     )
 
     controller = FixedModeTwoTimescaleController(
-        standby_mode=StandbyMode.SINGLE,
+        standby_mode=StandbyMode.HOT,
         handover_hot_window_s=1.0,
     )
 
@@ -413,17 +413,65 @@ def test_same_node_load_is_accumulated_and_overload_is_recorded() -> None:
         down_nodes_by_slot={},
     ).run()
 
-    audit = result.records[0].constraint_audit
+    record = result.records[0]
 
-    assert audit.node_cpu_demand[0] == pytest.approx(
-        120.0
+    assert (
+        record.initial_constraint_audit
+        .resource_constraints_met
+        is False
     )
-    assert audit.node_memory_demand_mb[0] == pytest.approx(
-        10000.0
+    assert record.fast_repair_attempted is True
+    assert record.fast_repair_succeeded is True
+    assert record.constraint_audit.all_constraints_met is True
+    assert record.request_success is True
+    assert all(
+        demand <= 8192.0
+        for demand in (
+            record.constraint_audit
+            .node_memory_demand_mb.values()
+        )
     )
-    assert audit.cpu_violation_node_ids == (0,)
-    assert audit.memory_violation_node_ids == (0,)
-    assert audit.resource_constraints_met is False
 
-    # 第一阶段只记录违反，原来的请求执行结果仍然保持成功。
-    assert result.records[0].request_success is True
+
+def test_unrepairable_single_replica_request_is_rejected() -> None:
+    """单副本无法达到双故障域要求时，活动请求不得执行。"""
+
+    controller = FixedModeTwoTimescaleController(
+        standby_mode=StandbyMode.SINGLE,
+        handover_hot_window_s=1.0,
+    )
+    result = build_test_simulator(
+        controller=controller,
+        risk=0.01,
+        request_trace=[1],
+        down_nodes_by_slot={},
+    ).run()
+
+    record = result.records[0]
+
+    assert record.fast_repair_attempted is True
+    assert record.fast_repair_succeeded is False
+    assert record.request_success is False
+    assert record.selected_execution_node_ids == ()
+    assert record.end_to_end_delay_ms is None
+
+
+def test_unrepairable_no_request_slot_is_not_counted_as_request_failure() -> None:
+    """无请求时修复失败只记录约束问题，不生成虚假的失败批次。"""
+
+    controller = FixedModeTwoTimescaleController(
+        standby_mode=StandbyMode.SINGLE,
+        handover_hot_window_s=1.0,
+    )
+    result = build_test_simulator(
+        controller=controller,
+        risk=0.01,
+        request_trace=[0],
+        down_nodes_by_slot={},
+    ).run()
+
+    record = result.records[0]
+
+    assert record.fast_repair_succeeded is False
+    assert record.request_success is None
+    assert result.summary.failed_batches == 0

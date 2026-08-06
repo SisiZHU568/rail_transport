@@ -47,12 +47,14 @@ from typing import Protocol
 
 import numpy as np
 
+from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     ServerlessFunction,
     SFCType,
     SlotConstraintAudit,
     TrainState,
 )
+from src.fast_optimizer import FastFeasibilityOptimizer
 from src.failure_process import FailureProcess
 from src.failure_risk_prediction import (
     FailureRiskProvider,
@@ -205,7 +207,16 @@ class TwoTimescaleSlotRecord:
     active_instance_count: int
     active_memory_mb: float
 
-    # 第一阶段只记录约束违反，不改变本时隙的请求执行结果。
+    # 修复前的审计用于解释为什么触发快层搜索。
+    initial_constraint_audit: SlotConstraintAudit
+
+    # succeeded=None表示原方案可行，因而没有执行搜索。
+    fast_repair_attempted: bool
+    fast_repair_succeeded: bool | None
+    fast_repair_reason: str
+    fast_repair_evaluated_candidate_count: int
+
+    # 最终采用方案的审计；修复失败时保留初审作为拒绝依据。
     constraint_audit: SlotConstraintAudit
 
 
@@ -373,9 +384,33 @@ class TwoTimescaleRuntimeSimulator:
             failure_risk_provider
         )
 
+        # 修复器的距离评分需要知道结果是否返回当前接入MEC，
+        # 因此必须在创建修复器之前保存该配置。
+        self.return_result_to_source = (
+            return_result_to_source
+        )
+
         # 复用 reliability.py 中考虑共享故障域的精确模型，
         # 避免仿真器内部出现第二套不一致的可靠性公式。
         self.reliability_model = reliability_model
+
+        # 审计器是资源需求和精确可靠性公式的唯一来源；
+        # 修复器通过复用它来保证搜索剪枝与最终复审口径一致。
+        self.constraint_auditor = SlotConstraintAuditor(
+            functions=self.functions,
+            sfc=self.sfc,
+            topology=self.topology,
+            reliability_model=self.reliability_model,
+        )
+        self.fast_optimizer = FastFeasibilityOptimizer(
+            functions=self.functions,
+            sfc=self.sfc,
+            topology=self.topology,
+            auditor=self.constraint_auditor,
+            return_result_to_source=(
+                self.return_result_to_source
+            ),
+        )
 
         self.prediction_horizon_slots = (
             prediction_horizon_slots
@@ -392,10 +427,6 @@ class TwoTimescaleRuntimeSimulator:
         )
 
         self.cost_weights = cost_weights
-
-        self.return_result_to_source = (
-            return_result_to_source
-        )
 
     def _predict_request_rate(
         self,
@@ -489,6 +520,31 @@ class TwoTimescaleRuntimeSimulator:
             in self.sfc.function_ids
         )
 
+    def _cold_activated_pairs(
+        self,
+        decision: FastTimescaleDecision,
+    ) -> set[tuple[int, int]]:
+        """把冷启动函数编号映射到最终执行节点。"""
+
+        # 修复失败或无请求时没有真实执行，不能计入请求冷启动内存。
+        if decision.request_success is not True:
+            return set()
+
+        selected_by_function = dict(
+            zip(
+                self.sfc.function_ids,
+                decision.selected_execution_node_ids,
+            )
+        )
+        return {
+            (
+                function_id,
+                selected_by_function[function_id],
+            )
+            for function_id
+            in decision.cold_start_function_ids
+        }
+
     def _calculate_active_memory(
         self,
         function_hot_node_ids: dict[
@@ -533,271 +589,6 @@ class TwoTimescaleRuntimeSimulator:
         return (
             len(active_pairs),
             active_memory_mb,
-        )
-
-    def _audit_slot_constraints(
-        self,
-        request_count: int,
-        candidate_map: dict[
-            int,
-            tuple[int, ...],
-        ],
-        selected_execution_node_ids: tuple[int, ...],
-        request_success: bool | None,
-        function_hot_node_ids: dict[
-            int,
-            tuple[int, ...],
-        ],
-        cold_activated_pairs: set[
-            tuple[int, int]
-        ],
-    ) -> SlotConstraintAudit:
-        """
-        审计本时隙的资源、部署计划和可靠性约束。
-
-        当前阶段采用“只记录、不拦截”的方式：即使发现资源超限
-        或可靠性不足，也不会在这里改写请求成功结果。这样可以先
-        观察现有策略产生了哪些不可行方案，再由后续优化器修复。
-        """
-
-        node_map = {
-            site.node.node_id: site.node
-            for site in self.topology.sites
-        }
-
-        required_function_ids = set(
-            self.sfc.function_ids
-        )
-        supplied_function_ids = set(candidate_map)
-
-        missing_function_ids = tuple(
-            sorted(
-                required_function_ids
-                - supplied_function_ids
-            )
-        )
-        extra_function_ids = tuple(
-            sorted(
-                supplied_function_ids
-                - required_function_ids
-            )
-        )
-
-        invalid_replica_node_ids: set[int] = set()
-
-        replica_plan_valid = not (
-            missing_function_ids
-            or extra_function_ids
-        )
-
-        reasons: list[str] = []
-
-        if missing_function_ids:
-            reasons.append(
-                "副本计划缺少函数"
-                f"{list(missing_function_ids)}。"
-            )
-
-        if extra_function_ids:
-            reasons.append(
-                "副本计划包含额外函数"
-                f"{list(extra_function_ids)}。"
-            )
-
-        for function_id in self.sfc.function_ids:
-            node_ids = candidate_map.get(
-                function_id,
-                (),
-            )
-
-            if not node_ids:
-                replica_plan_valid = False
-                reasons.append(
-                    f"函数{function_id}没有部署副本。"
-                )
-
-            if len(node_ids) != len(set(node_ids)):
-                replica_plan_valid = False
-                reasons.append(
-                    f"函数{function_id}存在重复副本节点。"
-                )
-
-            for node_id in node_ids:
-                if node_id not in node_map:
-                    invalid_replica_node_ids.add(
-                        node_id
-                    )
-                    replica_plan_valid = False
-
-        if invalid_replica_node_ids:
-            reasons.append(
-                "副本计划引用未知节点"
-                f"{sorted(invalid_replica_node_ids)}。"
-            )
-
-        # 只有已经保持温热，或本时隙实际发生冷启动的实例，
-        # 才占用活动实例内存。尚未启动的冷备用不在这里计费。
-        active_pairs = {
-            (function_id, node_id)
-            for function_id, node_ids
-            in function_hot_node_ids.items()
-            for node_id in node_ids
-        }
-
-        # 使用集合合并可以避免同一实例同时出现在“温实例”和
-        # “本时隙冷启动实例”中时被重复计算。
-        active_pairs.update(cold_activated_pairs)
-
-        node_memory_demand_mb: dict[
-            int,
-            float,
-        ] = {}
-
-        for function_id, node_id in active_pairs:
-            node_memory_demand_mb[node_id] = (
-                node_memory_demand_mb.get(
-                    node_id,
-                    0.0,
-                )
-                + self.function_map[
-                    function_id
-                ].memory_mb
-            )
-
-        node_cpu_demand: dict[int, float] = {}
-
-        # 失败或没有请求的时隙没有实际函数执行，因此 CPU 需求为零。
-        if request_success is True:
-            for function_id, node_id in zip(
-                self.sfc.function_ids,
-                selected_execution_node_ids,
-            ):
-                node_cpu_demand[node_id] = (
-                    node_cpu_demand.get(
-                        node_id,
-                        0.0,
-                    )
-                    + self.function_map[
-                        function_id
-                    ].cpu_demand(request_count)
-                )
-
-        cpu_violation_node_ids = tuple(
-            sorted(
-                node_id
-                for node_id, demand
-                in node_cpu_demand.items()
-                if demand
-                > node_map[node_id].cpu_capacity
-            )
-        )
-
-        memory_violation_node_ids = tuple(
-            sorted(
-                node_id
-                for node_id, demand
-                in node_memory_demand_mb.items()
-                if demand
-                > node_map[
-                    node_id
-                ].memory_capacity_mb
-            )
-        )
-
-        for node_id in cpu_violation_node_ids:
-            reasons.append(
-                f"节点{node_id}的CPU需求"
-                f"{node_cpu_demand[node_id]:.3f}超过容量"
-                f"{node_map[node_id].cpu_capacity:.3f}。"
-            )
-
-        for node_id in memory_violation_node_ids:
-            reasons.append(
-                f"节点{node_id}的内存需求"
-                f"{node_memory_demand_mb[node_id]:.3f}MB"
-                "超过容量"
-                f"{node_map[node_id].memory_capacity_mb:.3f}MB。"
-            )
-
-        exact_sfc_reliability: float | None = None
-        reliability_target_met = False
-
-        if replica_plan_valid:
-            reliability_result = (
-                self.reliability_model.evaluate_sfc(
-                    sfc=self.sfc,
-                    function_replica_node_ids=(
-                        candidate_map
-                    ),
-                )
-            )
-
-            exact_sfc_reliability = (
-                reliability_result
-                .exact_shared_failure_availability
-            )
-
-            # target_met 同时检查可靠性数值和最小故障域数量。
-            reliability_target_met = (
-                reliability_result.target_met
-            )
-
-            if not reliability_target_met:
-                reasons.append(
-                    "SFC可靠性"
-                    f"{exact_sfc_reliability:.6f}"
-                    "未达到目标"
-                    f"{self.sfc.reliability_target:.6f}，"
-                    "或故障域隔离要求未满足。"
-                )
-
-        resource_constraints_met = not (
-            cpu_violation_node_ids
-            or memory_violation_node_ids
-        )
-
-        all_constraints_met = (
-            resource_constraints_met
-            and replica_plan_valid
-            and reliability_target_met
-        )
-
-        return SlotConstraintAudit(
-            node_cpu_demand=dict(
-                sorted(node_cpu_demand.items())
-            ),
-            node_memory_demand_mb=dict(
-                sorted(
-                    node_memory_demand_mb.items()
-                )
-            ),
-            cpu_violation_node_ids=(
-                cpu_violation_node_ids
-            ),
-            memory_violation_node_ids=(
-                memory_violation_node_ids
-            ),
-            invalid_replica_node_ids=tuple(
-                sorted(invalid_replica_node_ids)
-            ),
-            missing_function_ids=(
-                missing_function_ids
-            ),
-            exact_sfc_reliability=(
-                exact_sfc_reliability
-            ),
-            reliability_target=(
-                self.sfc.reliability_target
-            ),
-            reliability_target_met=(
-                reliability_target_met
-            ),
-            resource_constraints_met=(
-                resource_constraints_met
-            ),
-            replica_plan_valid=replica_plan_valid,
-            all_constraints_met=all_constraints_met,
-            violation_reasons=tuple(reasons),
         )
 
     def run(
@@ -890,15 +681,6 @@ class TwoTimescaleRuntimeSimulator:
                 )
             )
 
-            plan_change_count = (
-                self._count_plan_changes(
-                    previous_map=(
-                        previous_candidate_map
-                    ),
-                    current_map=candidate_map,
-                )
-            )
-
             infrastructure_state = (
                 self.failure_process.state_for_slot(
                     train_state.time_slot
@@ -939,6 +721,63 @@ class TwoTimescaleRuntimeSimulator:
                 )
             )
 
+            # 真实执行前先审计原始计划；资源、可靠性或运行路径
+            # 任一不可行时，由快层在慢层模板约束内尝试搬迁副本。
+            initial_cold_pairs = (
+                self._cold_activated_pairs(
+                    fast_decision
+                )
+            )
+            initial_audit = (
+                self.constraint_auditor.audit(
+                    request_count=request_count,
+                    expected_replica_count=(
+                        slow_decision.replica_count
+                    ),
+                    candidate_map=candidate_map,
+                    selected_execution_node_ids=(
+                        fast_decision
+                        .selected_execution_node_ids
+                    ),
+                    request_success=(
+                        fast_decision.request_success
+                    ),
+                    function_hot_node_ids=(
+                        fast_decision
+                        .function_hot_node_ids
+                    ),
+                    cold_activated_pairs=(
+                        initial_cold_pairs
+                    ),
+                )
+            )
+            optimization = self.fast_optimizer.optimize(
+                state=fast_state,
+                slow_decision=slow_decision,
+                initial_decision=fast_decision,
+                initial_audit=initial_audit,
+            )
+
+            # 从这里开始，执行、成本和时隙记录只使用修复后的最终方案。
+            candidate_map = dict(
+                optimization.function_replica_node_ids
+            )
+            fast_decision = optimization.decision
+            constraint_audit = optimization.final_audit
+            cold_activated_pairs = (
+                self._cold_activated_pairs(
+                    fast_decision
+                )
+            )
+            plan_change_count = (
+                self._count_plan_changes(
+                    previous_map=(
+                        previous_candidate_map
+                    ),
+                    current_map=candidate_map,
+                )
+            )
+
             transmission_delay_ms: (
                 float | None
             ) = None
@@ -955,10 +794,6 @@ class TwoTimescaleRuntimeSimulator:
             ) = None
 
             deadline_met: bool | None = None
-
-            cold_activated_pairs: set[
-                tuple[int, int]
-            ] = set()
 
             if fast_decision.request_success is True:
                 cold_start_ids = set(
@@ -1024,22 +859,6 @@ class TwoTimescaleRuntimeSimulator:
                     <= self.sfc.deadline_ms
                 )
 
-                selected_nodes = (
-                    fast_decision
-                    .selected_execution_node_ids
-                )
-
-                for index, function_id in enumerate(
-                    self.sfc.function_ids
-                ):
-                    if function_id in cold_start_ids:
-                        cold_activated_pairs.add(
-                            (
-                                function_id,
-                                selected_nodes[index],
-                            )
-                        )
-
             (
                 active_instance_count,
                 active_memory_mb,
@@ -1051,27 +870,6 @@ class TwoTimescaleRuntimeSimulator:
                 cold_activated_pairs=(
                     cold_activated_pairs
                 ),
-            )
-
-            constraint_audit = (
-                self._audit_slot_constraints(
-                    request_count=request_count,
-                    candidate_map=candidate_map,
-                    selected_execution_node_ids=(
-                        fast_decision
-                        .selected_execution_node_ids
-                    ),
-                    request_success=(
-                        fast_decision.request_success
-                    ),
-                    function_hot_node_ids=(
-                        fast_decision
-                        .function_hot_node_ids
-                    ),
-                    cold_activated_pairs=(
-                        cold_activated_pairs
-                    ),
-                )
             )
 
             records.append(
@@ -1170,6 +968,22 @@ class TwoTimescaleRuntimeSimulator:
                     ),
                     active_memory_mb=(
                         active_memory_mb
+                    ),
+                    initial_constraint_audit=(
+                        initial_audit
+                    ),
+                    fast_repair_attempted=(
+                        optimization.attempted
+                    ),
+                    fast_repair_succeeded=(
+                        optimization.succeeded
+                    ),
+                    fast_repair_reason=(
+                        optimization.reason
+                    ),
+                    fast_repair_evaluated_candidate_count=(
+                        optimization
+                        .evaluated_candidate_count
                     ),
                     constraint_audit=(
                         constraint_audit

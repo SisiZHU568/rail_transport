@@ -200,6 +200,50 @@ class FastFeasibilityOptimizer:
             flattened_ids,
         )
 
+    def _preserve_initial_failure_failovers(
+        self,
+        state: FastTimescaleState,
+        decision: FastTimescaleDecision,
+    ) -> FastTimescaleDecision:
+        """保留相对修复前故障主节点发生的真实接管事件。"""
+
+        if decision.request_success is not True:
+            return decision
+
+        selected_by_function = dict(
+            zip(
+                state.function_ids,
+                decision.selected_execution_node_ids,
+            )
+        )
+        failover_ids = set(
+            decision.failover_function_ids
+        )
+
+        for function_id in state.function_ids:
+            initial_primary = (
+                state.candidate_node_ids[function_id][0]
+            )
+
+            # 修复器可能把原备用节点提升为新主节点。若原主节点
+            # 本时隙已经故障，这次执行在运行语义上仍属于主备接管。
+            if (
+                initial_primary
+                not in state.operational_node_ids
+                and selected_by_function[function_id]
+                != initial_primary
+            ):
+                failover_ids.add(function_id)
+
+        return replace(
+            decision,
+            failover_function_ids=tuple(
+                function_id
+                for function_id in state.function_ids
+                if function_id in failover_ids
+            ),
+        )
+
     def optimize(
         self,
         state: FastTimescaleState,
@@ -337,6 +381,12 @@ class FastFeasibilityOptimizer:
                 previously_hot_node_ids=(
                     initial_decision.function_hot_node_ids
                 ),
+            )
+            decision = (
+                self._preserve_initial_failure_failovers(
+                    state=state,
+                    decision=decision,
+                )
             )
             ranked_candidates.append(
                 (
