@@ -8,6 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from run_two_timescale_monte_carlo import (
+    build_simulator as build_monte_carlo_simulator,
+)
+from src.config import load_config
+from src.fast_slot_executor import FastSlotExecutor
 from src.two_timescale_monte_carlo import (
     run_two_timescale_monte_carlo,
 )
@@ -74,6 +79,14 @@ class FakeTwoTimescaleSimulator:
             constraint_rejected_batches=int(
                 value % 3
             ),
+            cloud_used_slots=2,
+            cloud_usage_rate=0.5,
+            total_run_cost=(
+                value + 45.0
+            ),
+            total_route_cost=(
+                value + 46.0
+            ),
             total_request_delay_cost=(
                 value + 50.0
             ),
@@ -97,6 +110,28 @@ class FakeTwoTimescaleSimulator:
         return SimpleNamespace(
             summary=summary
         )
+
+
+def test_monte_carlo_script_builder_uses_shared_executor() -> None:
+    """真实多种子实验入口也必须完成共享执行器迁移。"""
+
+    simulator = build_monte_carlo_simulator(
+        config=load_config("configs/debug.yaml"),
+        scenario_name="fixed_single",
+        random_seed=123,
+    )
+
+    assert isinstance(
+        simulator.fast_slot_executor,
+        FastSlotExecutor,
+    )
+    result = simulator.run()
+    assert len(result.records) > 0
+    assert result.summary.total_system_cost == pytest.approx(
+        result.summary.total_run_cost
+        + result.summary.total_route_cost
+        + result.summary.total_cold_start_cost
+    )
 
 
 def test_invalid_run_count_is_rejected() -> None:
@@ -180,6 +215,15 @@ def test_all_scenarios_receive_same_seeds() -> None:
         .fast_repair_success_rate
         == pytest.approx(0.75)
     )
+    assert result.run_records[0].cloud_usage_rate == pytest.approx(
+        0.5
+    )
+    assert result.run_records[0].total_run_cost == pytest.approx(
+        145.0
+    )
+    assert result.run_records[0].total_route_cost == pytest.approx(
+        146.0
+    )
 
 
 def test_scenario_summaries_are_created() -> None:
@@ -227,6 +271,9 @@ def test_scenario_summaries_are_created() -> None:
         0.75
     )
     assert summary_a.constraint_rejected_batches.count == 3
+    assert summary_a.cloud_usage_rate.mean == pytest.approx(0.5)
+    assert summary_a.total_run_cost.count == 3
+    assert summary_a.total_route_cost.count == 3
 
 
 def test_summary_contains_confidence_interval() -> None:

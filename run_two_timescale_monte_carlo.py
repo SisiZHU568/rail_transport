@@ -23,6 +23,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 from src.config import load_config
+from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     ServerlessFunction,
     ServicePriority,
@@ -30,6 +31,11 @@ from src.entities import (
 )
 from src.failure_risk_prediction import (
     build_windowed_failure_risk_provider,
+)
+from src.fast_optimizer import FastFeasibilityOptimizer
+from src.fast_slot_executor import (
+    FastSlotExecutor,
+    RuntimeCostRates,
 )
 from src.mobility import TrainMobilityModel
 from src.network import build_linear_mec_network
@@ -278,35 +284,119 @@ def build_simulator(
         )
     )
 
-    return TwoTimescaleRuntimeSimulator(
+    functions = build_demo_functions()
+    sfc = build_demo_sfc()
+    controller = build_controller(
+        config=config,
+        scenario_name=scenario_name,
+    )
+    reliability_model = (
+        build_fault_domain_reliability_model(
+            config=config,
+            topology=topology,
+        )
+    )
+    cost_weights = build_cost_weights(config)
+    cost_rates = RuntimeCostRates(
+        # 正式的边缘/云CPU单价将在配置迁移步骤加入；当前保持
+        # 既有规则实验的CPU零单价，同时完整统计内存和路由成本。
+        edge_cpu_cost_per_unit=0.0,
+        edge_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=0.0,
+        cloud_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_weights.cold_start_cost_per_ms
+        ),
+    )
+    auditor = SlotConstraintAuditor(
+        functions=functions,
+        sfc=sfc,
+        topology=topology,
+        reliability_model=reliability_model,
+    )
+    input_size_mb_per_request = float(
+        config["integrated_simulation"][
+            "input_size_mb_per_request"
+        ]
+    )
+    slot_seconds = float(
+        config["simulation"]["fast_slot_seconds"]
+    )
+    optimizer = FastFeasibilityOptimizer(
+        functions=functions,
+        sfc=sfc,
+        topology=topology,
+        auditor=auditor,
+        return_result_to_source=True,
+        network=network,
+        edge_cpu_cost_per_unit=(
+            cost_rates.edge_cpu_cost_per_unit
+        ),
+        edge_memory_cost_per_mb_second=(
+            cost_rates.edge_memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=(
+            cost_rates.cloud_cpu_cost_per_unit
+        ),
+        cloud_memory_cost_per_mb_second=(
+            cost_rates.cloud_memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_rates.cold_start_cost_per_ms
+        ),
+        input_size_mb_per_request=(
+            input_size_mb_per_request
+        ),
+        slot_seconds=slot_seconds,
+    )
+    fast_slot_executor = FastSlotExecutor(
         topology=topology,
         network=network,
+        functions=functions,
+        sfc=sfc,
+        replica_planners={
+            1: SingleReplicaPlanner(),
+            2: build_reliability_aware_replica_planner(
+                config,
+                replica_count=2,
+            ),
+            3: build_reliability_aware_replica_planner(
+                config,
+                replica_count=3,
+            ),
+        },
+        constraint_auditor=auditor,
+        fast_optimizer=optimizer,
+        input_size_mb_per_request=(
+            input_size_mb_per_request
+        ),
+        slot_seconds=slot_seconds,
+        handover_hot_window_s=float(
+            controller.handover_hot_window_s
+        ),
+        failover_delay_ms_per_function=float(
+            config["runtime_failure"][
+                "failover_delay_ms_per_function"
+            ]
+        ),
+        cost_rates=cost_rates,
+        return_result_to_source=True,
+    )
+
+    return TwoTimescaleRuntimeSimulator(
         mobility_model=mobility_model,
         workload=workload,
-        functions=build_demo_functions(),
-        sfc=build_demo_sfc(),
-        controller=build_controller(
-            config=config,
-            scenario_name=scenario_name,
-        ),
-        single_replica_planner=(
-            SingleReplicaPlanner()
-        ),
-        redundant_replica_planner=(
-            build_reliability_aware_replica_planner(
-                config
-            )
-        ),
+        sfc=sfc,
+        controller=controller,
+        fast_slot_executor=fast_slot_executor,
         failure_process=failure_process,
         failure_risk_provider=(
             build_windowed_failure_risk_provider(
                 config
-            )
-        ),
-        reliability_model=(
-            build_fault_domain_reliability_model(
-                config=config,
-                topology=topology,
             )
         ),
         prediction_horizon_slots=int(
@@ -314,27 +404,8 @@ def build_simulator(
                 "slow_period_slots"
             ]
         ),
-        input_size_mb_per_request=float(
-            config[
-                "integrated_simulation"
-            ][
-                "input_size_mb_per_request"
-            ]
-        ),
-        slot_seconds=float(
-            config["simulation"][
-                "fast_slot_seconds"
-            ]
-        ),
-        failover_delay_ms_per_function=float(
-            config["runtime_failure"][
-                "failover_delay_ms_per_function"
-            ]
-        ),
-        cost_weights=build_cost_weights(
-            config
-        ),
-        return_result_to_source=True,
+        slot_seconds=slot_seconds,
+        cost_weights=cost_weights,
     )
 
 
@@ -402,6 +473,11 @@ def print_scenario_summary(
     )
 
     print_metric(
+        "中心云使用率",
+        summary.cloud_usage_rate,
+    )
+
+    print_metric(
         "成功批次平均时延",
         summary
         .average_successful_batch_delay_ms,
@@ -424,6 +500,16 @@ def print_scenario_summary(
     print_metric(
         "冷启动函数阶段数",
         summary.cold_start_function_stages,
+    )
+
+    print_metric(
+        "运行成本",
+        summary.total_run_cost,
+    )
+
+    print_metric(
+        "路由成本",
+        summary.total_route_cost,
     )
 
     print_metric(
@@ -533,6 +619,9 @@ def save_summary_csv(
             "constraint_rejected_batches": (
                 summary.constraint_rejected_batches
             ),
+            "cloud_usage_rate": (
+                summary.cloud_usage_rate
+            ),
             "average_delay_ms": (
                 summary
                 .average_successful_batch_delay_ms
@@ -552,6 +641,12 @@ def save_summary_csv(
             ),
             "memory_cost": (
                 summary.total_memory_cost
+            ),
+            "run_cost": (
+                summary.total_run_cost
+            ),
+            "route_cost": (
+                summary.total_route_cost
             ),
             "cold_start_cost": (
                 summary.total_cold_start_cost
@@ -891,7 +986,7 @@ def main() -> None:
             "Two-Timescale Monte Carlo: "
             "Total System Cost"
         ),
-        y_label="Normalized Total Cost",
+        y_label="Run + Route + Cold Cost",
         output_path=cost_path,
     )
 

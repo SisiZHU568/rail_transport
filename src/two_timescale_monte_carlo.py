@@ -78,8 +78,13 @@ class TwoTimescaleMonteCarloRunRecord:
     fast_repair_success_rate: float
     constraint_rejected_batches: int
 
+    cloud_used_slots: int
+    cloud_usage_rate: float
+
     total_request_delay_cost: float
     total_memory_cost: float
+    total_run_cost: float
+    total_route_cost: float
     total_cold_start_cost: float
     total_sla_penalty: float
     total_slow_control_cost: float
@@ -116,8 +121,13 @@ class TwoTimescaleMonteCarloScenarioSummary:
     fast_repair_success_rate: MetricSummary
     constraint_rejected_batches: MetricSummary
 
+    cloud_used_slots: MetricSummary
+    cloud_usage_rate: MetricSummary
+
     total_request_delay_cost: MetricSummary
     total_memory_cost: MetricSummary
+    total_run_cost: MetricSummary
+    total_route_cost: MetricSummary
     total_cold_start_cost: MetricSummary
     total_sla_penalty: MetricSummary
     total_slow_control_cost: MetricSummary
@@ -259,11 +269,23 @@ def run_two_timescale_monte_carlo(
                     constraint_rejected_batches=(
                         summary.constraint_rejected_batches
                     ),
+                    cloud_used_slots=(
+                        summary.cloud_used_slots
+                    ),
+                    cloud_usage_rate=(
+                        summary.cloud_usage_rate
+                    ),
                     total_request_delay_cost=(
                         summary.total_request_delay_cost
                     ),
                     total_memory_cost=(
                         summary.total_memory_cost
+                    ),
+                    total_run_cost=(
+                        summary.total_run_cost
+                    ),
+                    total_route_cost=(
+                        summary.total_route_cost
                     ),
                     total_cold_start_cost=(
                         summary.total_cold_start_cost
@@ -368,11 +390,23 @@ def run_two_timescale_monte_carlo(
                 constraint_rejected_batches=metric(
                     "constraint_rejected_batches"
                 ),
+                cloud_used_slots=metric(
+                    "cloud_used_slots"
+                ),
+                cloud_usage_rate=metric(
+                    "cloud_usage_rate"
+                ),
                 total_request_delay_cost=metric(
                     "total_request_delay_cost"
                 ),
                 total_memory_cost=metric(
                     "total_memory_cost"
+                ),
+                total_run_cost=metric(
+                    "total_run_cost"
+                ),
+                total_route_cost=metric(
+                    "total_route_cost"
                 ),
                 total_cold_start_cost=metric(
                     "total_cold_start_cost"

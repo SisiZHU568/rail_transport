@@ -7,6 +7,7 @@ test_two_timescale_simulator.py
 import pytest
 
 from src.config import load_config
+from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     ServerlessFunction,
     ServicePriority,
@@ -17,6 +18,11 @@ from src.failure_process import (
 )
 from src.failure_risk_prediction import (
     ConstantFailureRiskProvider,
+)
+from src.fast_optimizer import FastFeasibilityOptimizer
+from src.fast_slot_executor import (
+    FastSlotExecutor,
+    RuntimeCostRates,
 )
 from src.mobility import TrainMobilityModel
 from src.network import build_linear_mec_network
@@ -122,40 +128,101 @@ def build_test_simulator(
         },
     )
 
-    return TwoTimescaleRuntimeSimulator(
+    functions = [build_test_function()]
+    sfc = build_test_sfc()
+    reliability_model = (
+        build_fault_domain_reliability_model(
+            config=config,
+            topology=topology,
+        )
+    )
+    cost_weights = build_cost_weights()
+    cost_rates = RuntimeCostRates(
+        edge_cpu_cost_per_unit=0.0,
+        edge_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=0.0,
+        cloud_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_weights.cold_start_cost_per_ms
+        ),
+    )
+    auditor = SlotConstraintAuditor(
+        functions=functions,
+        sfc=sfc,
+        topology=topology,
+        reliability_model=reliability_model,
+    )
+    optimizer = FastFeasibilityOptimizer(
+        functions=functions,
+        sfc=sfc,
+        topology=topology,
+        auditor=auditor,
+        network=network,
+        edge_cpu_cost_per_unit=(
+            cost_rates.edge_cpu_cost_per_unit
+        ),
+        edge_memory_cost_per_mb_second=(
+            cost_rates.edge_memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=(
+            cost_rates.cloud_cpu_cost_per_unit
+        ),
+        cloud_memory_cost_per_mb_second=(
+            cost_rates.cloud_memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_rates.cold_start_cost_per_ms
+        ),
+        input_size_mb_per_request=1.0,
+        slot_seconds=1.0,
+    )
+    fast_slot_executor = FastSlotExecutor(
         topology=topology,
         network=network,
+        functions=functions,
+        sfc=sfc,
+        replica_planners={
+            1: SingleReplicaPlanner(),
+            2: build_reliability_aware_replica_planner(
+                config,
+                replica_count=2,
+            ),
+            3: build_reliability_aware_replica_planner(
+                config,
+                replica_count=3,
+            ),
+        },
+        constraint_auditor=auditor,
+        fast_optimizer=optimizer,
+        input_size_mb_per_request=1.0,
+        slot_seconds=1.0,
+        handover_hot_window_s=float(
+            controller.handover_hot_window_s
+        ),
+        failover_delay_ms_per_function=20.0,
+        cost_rates=cost_rates,
+        return_result_to_source=True,
+    )
+
+    return TwoTimescaleRuntimeSimulator(
         mobility_model=mobility_model,
         workload=workload,
-        functions=[build_test_function()],
-        sfc=build_test_sfc(),
+        sfc=sfc,
         controller=controller,
-        single_replica_planner=(
-            SingleReplicaPlanner()
-        ),
-        redundant_replica_planner=(
-            build_reliability_aware_replica_planner(
-                config
-            )
-        ),
+        fast_slot_executor=fast_slot_executor,
         failure_process=failure_process,
         failure_risk_provider=(
             ConstantFailureRiskProvider(
                 risk=risk
             )
         ),
-        reliability_model=(
-            build_fault_domain_reliability_model(
-                config=config,
-                topology=topology,
-            )
-        ),
         prediction_horizon_slots=4,
-        input_size_mb_per_request=1.0,
         slot_seconds=1.0,
-        failover_delay_ms_per_function=20.0,
-        cost_weights=build_cost_weights(),
-        return_result_to_source=True,
+        cost_weights=cost_weights,
     )
 
 
@@ -278,7 +345,7 @@ def test_handover_forces_slow_decision_update() -> None:
 
 def test_total_cost_equals_all_cost_components() -> None:
     """
-    综合成本必须等于五类成本之和。
+    综合成本必须等于共享执行器的三类成本之和。
     """
 
     result = build_test_simulator(
@@ -289,11 +356,9 @@ def test_total_cost_equals_all_cost_components() -> None:
     summary = result.summary
 
     expected = (
-        summary.total_request_delay_cost
-        + summary.total_memory_cost
+        summary.total_run_cost
+        + summary.total_route_cost
         + summary.total_cold_start_cost
-        + summary.total_sla_penalty
-        + summary.total_slow_control_cost
     )
 
     assert summary.total_system_cost == pytest.approx(

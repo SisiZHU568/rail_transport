@@ -47,48 +47,25 @@ from typing import Protocol
 
 import numpy as np
 
-from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
-    ServerlessFunction,
     SFCType,
     SlotConstraintAudit,
-    TrainState,
 )
-from src.fast_optimizer import FastFeasibilityOptimizer
 from src.failure_process import FailureProcess
 from src.failure_risk_prediction import (
     FailureRiskProvider,
 )
-from src.mobility import TrainMobilityModel
-from src.network import TransferNetworkProtocol
-from src.redundancy_placement import (
-    ReplicaPlacementPlan,
+from src.fast_slot_executor import (
+    FastSlotExecutor,
+    FastSlotInput,
 )
-from src.reliability import FaultDomainReliabilityModel
-from src.sfc_execution import execute_sfc_batch
-from src.topology import LinearRailTopology
+from src.mobility import TrainMobilityModel
 from src.two_timescale_control import (
-    FastTimescaleDecision,
-    FastTimescaleState,
     SlowTimescaleDecision,
     SlowTimescaleState,
     retention_policy_to_legacy_mode,
 )
 from src.workload import DeterministicWorkload
-
-
-class ReplicaPlannerProtocol(Protocol):
-    """
-    副本规划器接口。
-    """
-
-    def plan(
-        self,
-        sfc: SFCType,
-        train_state: TrainState,
-        topology: LinearRailTopology,
-    ) -> ReplicaPlacementPlan:
-        ...
 
 
 class TwoTimescaleControllerProtocol(Protocol):
@@ -104,14 +81,6 @@ class TwoTimescaleControllerProtocol(Protocol):
         state: SlowTimescaleState,
     ) -> SlowTimescaleDecision:
         ...
-
-    def get_fast_decision(
-        self,
-        state: FastTimescaleState,
-        slow_decision: SlowTimescaleDecision,
-    ) -> FastTimescaleDecision:
-        ...
-
 
 @dataclass(frozen=True)
 class TwoTimescaleCostWeights:
@@ -172,6 +141,9 @@ class TwoTimescaleSlotRecord:
     slow_mode: str
     use_redundancy: bool
     replica_count: int
+    retention_policy: str
+    cloud_policy: str
+    cloud_used: bool
     slow_reason: str
 
     replica_plan_changed_function_count: int
@@ -219,6 +191,15 @@ class TwoTimescaleSlotRecord:
     # 最终采用方案的审计；修复失败时保留初审作为拒绝依据。
     constraint_audit: SlotConstraintAudit
 
+    # 最终审计或运行路径不可行时为True，且不会进入SFC执行器。
+    constraint_rejected: bool
+
+    # 与强化学习环境共享的三项原始成本。
+    total_run_cost: float
+    total_route_cost: float
+    total_cold_start_cost: float
+    total_system_cost: float
+
 
 @dataclass(frozen=True)
 class TwoTimescaleSummary:
@@ -255,6 +236,9 @@ class TwoTimescaleSummary:
     fast_repair_success_rate: float
     constraint_rejected_batches: int
 
+    cloud_used_slots: int
+    cloud_usage_rate: float
+
     average_successful_batch_delay_ms: float
     p95_successful_batch_delay_ms: float
 
@@ -269,6 +253,8 @@ class TwoTimescaleSummary:
 
     total_request_delay_cost: float
     total_memory_cost: float
+    total_run_cost: float
+    total_route_cost: float
     total_cold_start_cost: float
     total_sla_penalty: float
     total_slow_control_cost: float
@@ -296,42 +282,28 @@ class TwoTimescaleRuntimeSimulator:
 
     def __init__(
         self,
-        topology: LinearRailTopology,
-        network: TransferNetworkProtocol,
         mobility_model: TrainMobilityModel,
         workload: DeterministicWorkload,
-        functions: list[ServerlessFunction],
         sfc: SFCType,
         controller: TwoTimescaleControllerProtocol,
-        single_replica_planner: ReplicaPlannerProtocol,
-        redundant_replica_planner: ReplicaPlannerProtocol,
+        fast_slot_executor: FastSlotExecutor,
         failure_process: FailureProcess,
         failure_risk_provider: FailureRiskProvider,
-        reliability_model: FaultDomainReliabilityModel,
         prediction_horizon_slots: int,
-        input_size_mb_per_request: float,
         slot_seconds: float,
-        failover_delay_ms_per_function: float,
         cost_weights: TwoTimescaleCostWeights,
-        return_result_to_source: bool = True,
     ) -> None:
         """
         创建双时间尺度完整仿真器。
-        """
 
-        if len(functions) == 0:
-            raise ValueError(
-                "至少需要一个Serverless函数。"
-            )
+        仿真器只负责慢层时序、列车移动和指标汇总；副本规划、
+        快层决策、约束修复、SFC执行和三项成本统一交给
+        ``fast_slot_executor``，避免规则方案与RL环境出现两套口径。
+        """
 
         if prediction_horizon_slots <= 0:
             raise ValueError(
                 "负载预测窗口必须大于0。"
-            )
-
-        if input_size_mb_per_request < 0:
-            raise ValueError(
-                "单请求输入数据量不能小于0。"
             )
 
         if slot_seconds <= 0:
@@ -339,117 +311,19 @@ class TwoTimescaleRuntimeSimulator:
                 "时隙长度必须大于0。"
             )
 
-        if failover_delay_ms_per_function < 0:
-            raise ValueError(
-                "故障切换时延不能小于0。"
-            )
-
-        function_map: dict[
-            int,
-            ServerlessFunction,
-        ] = {}
-
-        for function in functions:
-            if function.function_id in function_map:
-                raise ValueError(
-                    f"函数编号{function.function_id}重复。"
-                )
-
-            function_map[
-                function.function_id
-            ] = function
-
-        for function_id in sfc.function_ids:
-            if function_id not in function_map:
-                raise KeyError(
-                    f"缺少function_id={function_id}。"
-                )
-
-        self.topology = topology
-        self.network = network
         self.mobility_model = mobility_model
         self.workload = workload
-
-        self.functions = functions
-        self.function_map = function_map
         self.sfc = sfc
-
         self.controller = controller
-
-        self.single_replica_planner = (
-            single_replica_planner
-        )
-
-        self.redundant_replica_planner = (
-            redundant_replica_planner
-        )
-
+        self.fast_slot_executor = fast_slot_executor
         self.failure_process = failure_process
-
         self.failure_risk_provider = (
             failure_risk_provider
         )
-
-        # 修复器的传输成本需要知道结果是否返回当前接入MEC，
-        # 因此必须在创建修复器之前保存该配置。
-        self.return_result_to_source = (
-            return_result_to_source
-        )
-
-        # 复用 reliability.py 中考虑共享故障域的精确模型，
-        # 避免仿真器内部出现第二套不一致的可靠性公式。
-        self.reliability_model = reliability_model
-
-        # 审计器是资源需求和精确可靠性公式的唯一来源；
-        # 修复器通过复用它来保证搜索剪枝与最终复审口径一致。
-        self.constraint_auditor = SlotConstraintAuditor(
-            functions=self.functions,
-            sfc=self.sfc,
-            topology=self.topology,
-            reliability_model=self.reliability_model,
-        )
-        self.fast_optimizer = FastFeasibilityOptimizer(
-            functions=self.functions,
-            sfc=self.sfc,
-            topology=self.topology,
-            auditor=self.constraint_auditor,
-            return_result_to_source=(
-                self.return_result_to_source
-            ),
-            network=network,
-            # 旧规则模拟器没有单独的CPU计价参数，先保持为0；
-            # 下一步共享执行器会统一接入新的边缘/云成本率对象。
-            edge_cpu_cost_per_unit=0.0,
-            cloud_cpu_cost_per_unit=0.0,
-            edge_memory_cost_per_mb_second=(
-                cost_weights.memory_cost_per_mb_second
-            ),
-            cloud_memory_cost_per_mb_second=(
-                cost_weights.memory_cost_per_mb_second
-            ),
-            cold_start_cost_per_ms=(
-                cost_weights.cold_start_cost_per_ms
-            ),
-            input_size_mb_per_request=(
-                input_size_mb_per_request
-            ),
-            slot_seconds=slot_seconds,
-        )
-
         self.prediction_horizon_slots = (
             prediction_horizon_slots
         )
-
-        self.input_size_mb_per_request = (
-            input_size_mb_per_request
-        )
-
         self.slot_seconds = slot_seconds
-
-        self.failover_delay_ms_per_function = (
-            failover_delay_ms_per_function
-        )
-
         self.cost_weights = cost_weights
 
     def _predict_request_rate(
@@ -474,145 +348,6 @@ class TwoTimescaleRuntimeSimulator:
 
         return float(
             np.mean(future_counts)
-        )
-
-    def _build_candidate_map(
-        self,
-        train_state: TrainState,
-        slow_decision: SlowTimescaleDecision,
-    ) -> dict[int, tuple[int, ...]]:
-        """
-        根据慢动作选择单副本或跨域双副本规划器。
-        """
-
-        if slow_decision.use_redundancy:
-            planner = (
-                self.redundant_replica_planner
-            )
-        else:
-            planner = (
-                self.single_replica_planner
-            )
-
-        plan = planner.plan(
-            sfc=self.sfc,
-            train_state=train_state,
-            topology=self.topology,
-        )
-
-        candidate_map = {
-            function_id: tuple(node_ids)
-            for function_id, node_ids
-            in plan.function_replica_node_ids.items()
-        }
-
-        if set(candidate_map) != set(
-            self.sfc.function_ids
-        ):
-            raise ValueError(
-                "副本计划与SFC函数集合不一致。"
-            )
-
-        return candidate_map
-
-    def _count_plan_changes(
-        self,
-        previous_map: (
-            dict[int, tuple[int, ...]] | None
-        ),
-        current_map: dict[
-            int,
-            tuple[int, ...],
-        ],
-    ) -> int:
-        """
-        统计有多少个函数的副本计划发生变化。
-
-        首个时隙视为初始部署，
-        因此所有函数都计为一次配置操作。
-        """
-
-        if previous_map is None:
-            return len(self.sfc.function_ids)
-
-        return sum(
-            int(
-                previous_map[function_id]
-                != current_map[function_id]
-            )
-            for function_id
-            in self.sfc.function_ids
-        )
-
-    def _cold_activated_pairs(
-        self,
-        decision: FastTimescaleDecision,
-    ) -> set[tuple[int, int]]:
-        """把冷启动函数编号映射到最终执行节点。"""
-
-        # 修复失败或无请求时没有真实执行，不能计入请求冷启动内存。
-        if decision.request_success is not True:
-            return set()
-
-        selected_by_function = dict(
-            zip(
-                self.sfc.function_ids,
-                decision.selected_execution_node_ids,
-            )
-        )
-        return {
-            (
-                function_id,
-                selected_by_function[function_id],
-            )
-            for function_id
-            in decision.cold_start_function_ids
-        }
-
-    def _calculate_active_memory(
-        self,
-        function_hot_node_ids: dict[
-            int,
-            tuple[int, ...],
-        ],
-        cold_activated_pairs: set[
-            tuple[int, int],
-        ],
-    ) -> tuple[int, float]:
-        """
-        统计温实例和本时隙临时启动的冷备用内存。
-        """
-
-        active_pairs: set[
-            tuple[int, int]
-        ] = set()
-
-        for function_id, node_ids in (
-            function_hot_node_ids.items()
-        ):
-            for node_id in node_ids:
-                active_pairs.add(
-                    (
-                        function_id,
-                        node_id,
-                    )
-                )
-
-        active_pairs.update(
-            cold_activated_pairs
-        )
-
-        active_memory_mb = sum(
-            self.function_map[
-                function_id
-            ].memory_mb
-            for function_id, _
-            in active_pairs
-        )
-
-        return (
-            len(active_pairs),
-            active_memory_mb,
         )
 
     def run(
@@ -707,202 +442,28 @@ class TwoTimescaleRuntimeSimulator:
                 != previous_slow_policy
             )
 
-            candidate_map = (
-                self._build_candidate_map(
-                    train_state=train_state,
-                    slow_decision=slow_decision,
-                )
-            )
-
             infrastructure_state = (
                 self.failure_process.state_for_slot(
                     train_state.time_slot
                 )
             )
-
-            operational_node_ids = frozenset(
-                site.node.node_id
-                for site in self.topology.sites
-                if infrastructure_state
-                .is_node_operational(
-                    node_id=site.node.node_id,
-                    topology=self.topology,
-                )
-            )
-
-            fast_state = FastTimescaleState(
-                time_slot=train_state.time_slot,
-                serving_mec=train_state.serving_mec,
-                remaining_dwell_time_s=(
-                    train_state
-                    .remaining_dwell_time_s
-                ),
-                request_count=request_count,
-                function_ids=tuple(
-                    self.sfc.function_ids
-                ),
-                candidate_node_ids=candidate_map,
-                operational_node_ids=(
-                    operational_node_ids
-                ),
-            )
-
-            fast_decision = (
-                self.controller.get_fast_decision(
-                    state=fast_state,
-                    slow_decision=slow_decision,
-                )
-            )
-
-            # 真实执行前先审计原始计划；资源、可靠性或运行路径
-            # 任一不可行时，由快层在慢层模板约束内尝试搬迁副本。
-            initial_cold_pairs = (
-                self._cold_activated_pairs(
-                    fast_decision
-                )
-            )
-            initial_audit = (
-                self.constraint_auditor.audit(
+            # 规则仿真器不再自行构造快层决定。这个调用是每个快时隙
+            # 唯一的规划、审计、修复、执行和成本数据来源。
+            fast_result = self.fast_slot_executor.execute(
+                FastSlotInput(
+                    train_state=train_state,
                     request_count=request_count,
-                    expected_replica_count=(
-                        slow_decision.replica_count
+                    infrastructure_state=(
+                        infrastructure_state
                     ),
-                    candidate_map=candidate_map,
-                    selected_execution_node_ids=(
-                        fast_decision
-                        .selected_execution_node_ids
-                    ),
-                    request_success=(
-                        fast_decision.request_success
-                    ),
-                    function_hot_node_ids=(
-                        fast_decision
-                        .function_hot_node_ids
-                    ),
-                    cold_activated_pairs=(
-                        initial_cold_pairs
-                    ),
-                )
-            )
-            optimization = self.fast_optimizer.optimize(
-                state=fast_state,
-                slow_decision=slow_decision,
-                initial_decision=fast_decision,
-                initial_audit=initial_audit,
-            )
-
-            # 从这里开始，执行、成本和时隙记录只使用修复后的最终方案。
-            candidate_map = dict(
-                optimization.function_replica_node_ids
-            )
-            fast_decision = optimization.decision
-            constraint_audit = optimization.final_audit
-            cold_activated_pairs = (
-                self._cold_activated_pairs(
-                    fast_decision
-                )
-            )
-            plan_change_count = (
-                self._count_plan_changes(
-                    previous_map=(
+                    slow_decision=slow_decision,
+                    previous_candidate_map=(
                         previous_candidate_map
                     ),
-                    current_map=candidate_map,
                 )
             )
-
-            transmission_delay_ms: (
-                float | None
-            ) = None
-
-            execution_delay_ms: (
-                float | None
-            ) = None
-
-            cold_start_delay_ms = 0.0
-            failover_delay_ms = 0.0
-
-            end_to_end_delay_ms: (
-                float | None
-            ) = None
-
-            deadline_met: bool | None = None
-
-            if fast_decision.request_success is True:
-                cold_start_ids = set(
-                    fast_decision
-                    .cold_start_function_ids
-                )
-
-                sfc_result = execute_sfc_batch(
-                    functions=self.functions,
-                    sfc=self.sfc,
-                    placement_node_ids=list(
-                        fast_decision
-                        .selected_execution_node_ids
-                    ),
-                    source_node_id=(
-                        train_state.serving_mec
-                    ),
-                    input_size_mb_per_request=(
-                        self.input_size_mb_per_request
-                    ),
-                    request_count=request_count,
-                    network=self.network,
-                    cold_start_function_ids=(
-                        cold_start_ids
-                    ),
-                    return_result_to_source=(
-                        self.return_result_to_source
-                    ),
-                )
-
-                transmission_delay_ms = (
-                    sfc_result
-                    .total_transmission_delay_ms
-                )
-
-                execution_delay_ms = (
-                    sfc_result
-                    .total_execution_delay_ms
-                )
-
-                cold_start_delay_ms = (
-                    sfc_result
-                    .total_cold_start_delay_ms
-                )
-
-                failover_delay_ms = (
-                    len(
-                        fast_decision
-                        .failover_function_ids
-                    )
-                    * self
-                    .failover_delay_ms_per_function
-                )
-
-                end_to_end_delay_ms = (
-                    sfc_result
-                    .total_end_to_end_delay_ms
-                    + failover_delay_ms
-                )
-
-                deadline_met = (
-                    end_to_end_delay_ms
-                    <= self.sfc.deadline_ms
-                )
-
-            (
-                active_instance_count,
-                active_memory_mb,
-            ) = self._calculate_active_memory(
-                function_hot_node_ids=(
-                    fast_decision
-                    .function_hot_node_ids
-                ),
-                cold_activated_pairs=(
-                    cold_activated_pairs
-                ),
+            candidate_map = dict(
+                fast_result.function_replica_node_ids
             )
 
             records.append(
@@ -946,82 +507,101 @@ class TwoTimescaleRuntimeSimulator:
                     replica_count=(
                         slow_decision.replica_count
                     ),
+                    retention_policy=(
+                        slow_decision
+                        .retention_policy.name.lower()
+                    ),
+                    cloud_policy=(
+                        slow_decision
+                        .cloud_policy.name.lower()
+                    ),
+                    cloud_used=fast_result.used_cloud,
                     slow_reason=(
                         slow_decision.reason
                     ),
                     replica_plan_changed_function_count=(
-                        plan_change_count
+                        fast_result.plan_change_count
                     ),
                     function_replica_node_ids=(
                         candidate_map
                     ),
                     function_hot_node_ids=(
-                        fast_decision
-                        .function_hot_node_ids
+                        fast_result.function_hot_node_ids
                     ),
                     selected_execution_node_ids=(
-                        fast_decision
+                        fast_result
                         .selected_execution_node_ids
                     ),
                     backup_activation_triggered=(
-                        fast_decision
+                        fast_result
                         .backup_activation_triggered
                     ),
                     failover_function_ids=(
-                        fast_decision
+                        fast_result
                         .failover_function_ids
                     ),
                     cold_start_function_ids=(
-                        fast_decision
+                        fast_result
                         .cold_start_function_ids
                     ),
                     unavailable_function_ids=(
-                        fast_decision
+                        fast_result
                         .unavailable_function_ids
                     ),
                     request_success=(
-                        fast_decision.request_success
+                        fast_result.request_success
                     ),
                     transmission_delay_ms=(
-                        transmission_delay_ms
+                        fast_result.transmission_delay_ms
                     ),
                     execution_delay_ms=(
-                        execution_delay_ms
+                        fast_result.execution_delay_ms
                     ),
                     cold_start_delay_ms=(
-                        cold_start_delay_ms
+                        fast_result.cold_start_delay_ms
                     ),
                     failover_delay_ms=(
-                        failover_delay_ms
+                        fast_result.failover_delay_ms
                     ),
                     end_to_end_delay_ms=(
-                        end_to_end_delay_ms
+                        fast_result.end_to_end_delay_ms
                     ),
-                    deadline_met=deadline_met,
+                    deadline_met=fast_result.deadline_met,
                     active_instance_count=(
-                        active_instance_count
+                        fast_result.active_instance_count
                     ),
                     active_memory_mb=(
-                        active_memory_mb
+                        fast_result.active_memory_mb
                     ),
                     initial_constraint_audit=(
-                        initial_audit
+                        fast_result.initial_audit
                     ),
                     fast_repair_attempted=(
-                        optimization.attempted
+                        fast_result.fast_repair_attempted
                     ),
                     fast_repair_succeeded=(
-                        optimization.succeeded
+                        fast_result.fast_repair_succeeded
                     ),
                     fast_repair_reason=(
-                        optimization.reason
+                        fast_result.fast_repair_reason
                     ),
                     fast_repair_evaluated_candidate_count=(
-                        optimization
-                        .evaluated_candidate_count
+                        fast_result
+                        .fast_repair_evaluated_candidate_count
                     ),
                     constraint_audit=(
-                        constraint_audit
+                        fast_result.final_audit
+                    ),
+                    constraint_rejected=(
+                        fast_result.constraint_rejected
+                    ),
+                    total_run_cost=fast_result.run_cost,
+                    total_route_cost=fast_result.route_cost,
+                    total_cold_start_cost=(
+                        fast_result.cold_start_cost
+                    ),
+                    total_system_cost=(
+                        fast_result.total_cost
                     ),
                 )
             )
@@ -1185,9 +765,19 @@ class TwoTimescaleRuntimeSimulator:
         constraint_rejected_batches = sum(
             int(
                 record.request_count > 0
-                and record.fast_repair_succeeded is False
+                and record.constraint_rejected
             )
             for record in records
+        )
+
+        cloud_used_slots = sum(
+            int(record.cloud_used)
+            for record in records
+        )
+        cloud_usage_rate = (
+            cloud_used_slots / len(records)
+            if records
+            else 0.0
         )
 
         successful_delays = [
@@ -1271,10 +861,19 @@ class TwoTimescaleRuntimeSimulator:
             .memory_cost_per_mb_second
         )
 
-        total_cold_start_cost = (
-            total_cold_start_delay_ms
-            * self.cost_weights
-            .cold_start_cost_per_ms
+        # 这三项由共享执行器逐时隙直接计价，规则仿真和RL环境
+        # 因而使用完全相同的总成本定义。
+        total_run_cost = sum(
+            record.total_run_cost
+            for record in records
+        )
+        total_route_cost = sum(
+            record.total_route_cost
+            for record in records
+        )
+        total_cold_start_cost = sum(
+            record.total_cold_start_cost
+            for record in records
         )
 
         total_sla_penalty = (
@@ -1294,11 +893,9 @@ class TwoTimescaleRuntimeSimulator:
         )
 
         total_system_cost = (
-            total_request_delay_cost
-            + total_memory_cost
+            total_run_cost
+            + total_route_cost
             + total_cold_start_cost
-            + total_sla_penalty
-            + total_slow_control_cost
         )
 
         return TwoTimescaleSummary(
@@ -1354,6 +951,8 @@ class TwoTimescaleRuntimeSimulator:
             constraint_rejected_batches=(
                 constraint_rejected_batches
             ),
+            cloud_used_slots=cloud_used_slots,
+            cloud_usage_rate=cloud_usage_rate,
             average_successful_batch_delay_ms=(
                 average_delay
             ),
@@ -1384,6 +983,8 @@ class TwoTimescaleRuntimeSimulator:
             total_memory_cost=(
                 total_memory_cost
             ),
+            total_run_cost=total_run_cost,
+            total_route_cost=total_route_cost,
             total_cold_start_cost=(
                 total_cold_start_cost
             ),

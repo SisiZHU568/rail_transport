@@ -7,6 +7,7 @@ test_two_timescale_simulator.py
 import pytest
 
 from src.config import load_config
+from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     ServerlessFunction,
     ServicePriority,
@@ -17,6 +18,13 @@ from src.failure_process import (
 )
 from src.failure_risk_prediction import (
     ConstantFailureRiskProvider,
+)
+from src.fast_optimizer import FastFeasibilityOptimizer
+from src.fast_slot_executor import (
+    FastSlotExecutionResult,
+    FastSlotExecutor,
+    FastSlotInput,
+    RuntimeCostRates,
 )
 from src.mobility import TrainMobilityModel
 from src.network import build_linear_mec_network
@@ -88,6 +96,7 @@ def build_test_simulator(
     down_nodes_by_slot: (
         dict[int, set[int]] | None
     ) = None,
+    use_spy_executor: bool = False,
 ) -> TwoTimescaleRuntimeSimulator:
     """
     请求在时隙3到达。
@@ -150,41 +159,134 @@ def build_test_simulator(
         down_nodes_by_slot=selected_down_nodes,
     )
 
-    return TwoTimescaleRuntimeSimulator(
-        topology=topology,
-        network=network,
-        mobility_model=mobility_model,
-        workload=workload,
+    reliability_model = (
+        build_fault_domain_reliability_model(
+            config=config,
+            topology=topology,
+        )
+    )
+    auditor = SlotConstraintAuditor(
         functions=selected_functions,
         sfc=selected_sfc,
+        topology=topology,
+        reliability_model=reliability_model,
+    )
+    cost_weights = build_cost_weights()
+    cost_rates = RuntimeCostRates(
+        # 旧规则基线没有单独CPU单价，本步骤保持为0，
+        # 只把原有内存和冷启动价格接入共享成本口径。
+        edge_cpu_cost_per_unit=0.0,
+        edge_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=0.0,
+        cloud_memory_cost_per_mb_second=(
+            cost_weights.memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_weights.cold_start_cost_per_ms
+        ),
+    )
+    optimizer = FastFeasibilityOptimizer(
+        functions=selected_functions,
+        sfc=selected_sfc,
+        topology=topology,
+        auditor=auditor,
+        network=network,
+        edge_cpu_cost_per_unit=(
+            cost_rates.edge_cpu_cost_per_unit
+        ),
+        edge_memory_cost_per_mb_second=(
+            cost_rates.edge_memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=(
+            cost_rates.cloud_cpu_cost_per_unit
+        ),
+        cloud_memory_cost_per_mb_second=(
+            cost_rates.cloud_memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=(
+            cost_rates.cold_start_cost_per_ms
+        ),
+        input_size_mb_per_request=1.0,
+        slot_seconds=1.0,
+    )
+    shared_executor: FastSlotExecutor | SpyFastSlotExecutor = (
+        FastSlotExecutor(
+            topology=topology,
+            network=network,
+            functions=selected_functions,
+            sfc=selected_sfc,
+            replica_planners={
+                1: SingleReplicaPlanner(),
+                2: build_reliability_aware_replica_planner(
+                    config,
+                    replica_count=2,
+                ),
+                3: build_reliability_aware_replica_planner(
+                    config,
+                    replica_count=3,
+                ),
+            },
+            constraint_auditor=auditor,
+            fast_optimizer=optimizer,
+            input_size_mb_per_request=1.0,
+            slot_seconds=1.0,
+            handover_hot_window_s=float(
+                controller.handover_hot_window_s
+            ),
+            failover_delay_ms_per_function=20.0,
+            cost_rates=cost_rates,
+            return_result_to_source=True,
+        )
+    )
+    if use_spy_executor:
+        shared_executor = SpyFastSlotExecutor(
+            shared_executor
+        )
+
+    return TwoTimescaleRuntimeSimulator(
+        mobility_model=mobility_model,
+        workload=workload,
+        sfc=selected_sfc,
         controller=controller,
-        single_replica_planner=(
-            SingleReplicaPlanner()
-        ),
-        redundant_replica_planner=(
-            build_reliability_aware_replica_planner(
-                config
-            )
-        ),
+        fast_slot_executor=shared_executor,
         failure_process=failure_process,
         failure_risk_provider=(
             ConstantFailureRiskProvider(
                 risk=risk
             )
         ),
-        reliability_model=(
-            build_fault_domain_reliability_model(
-                config=config,
-                topology=topology,
-            )
-        ),
         prediction_horizon_slots=4,
-        input_size_mb_per_request=1.0,
         slot_seconds=1.0,
-        failover_delay_ms_per_function=20.0,
-        cost_weights=build_cost_weights(),
-        return_result_to_source=True,
+        cost_weights=cost_weights,
     )
+
+
+class SpyFastSlotExecutor:
+    """包装真实执行器，只记录委托次数和实际返回值。"""
+
+    def __init__(self, delegate: FastSlotExecutor) -> None:
+        self.delegate = delegate
+        self.inputs: list[FastSlotInput] = []
+        self.results: list[FastSlotExecutionResult] = []
+
+    @property
+    def call_count(self) -> int:
+        """返回规则仿真器实际委托的快时隙数量。"""
+
+        return len(self.inputs)
+
+    def execute(
+        self,
+        slot_input: FastSlotInput,
+    ) -> FastSlotExecutionResult:
+        """调用真实执行器后保存输入和输出，不修改结果。"""
+
+        result = self.delegate.execute(slot_input)
+        self.inputs.append(slot_input)
+        self.results.append(result)
+        return result
 
 
 def build_rule_controller(
@@ -306,7 +408,7 @@ def test_handover_forces_slow_decision_update() -> None:
 
 def test_total_cost_equals_all_cost_components() -> None:
     """
-    综合成本必须等于五类成本之和。
+    新总成本必须等于运行、路由和冷启动三类成本之和。
     """
 
     result = build_test_simulator(
@@ -317,15 +419,40 @@ def test_total_cost_equals_all_cost_components() -> None:
     summary = result.summary
 
     expected = (
-        summary.total_request_delay_cost
-        + summary.total_memory_cost
+        summary.total_run_cost
+        + summary.total_route_cost
         + summary.total_cold_start_cost
-        + summary.total_sla_penalty
-        + summary.total_slow_control_cost
     )
 
     assert summary.total_system_cost == pytest.approx(
         expected
+    )
+
+
+def test_simulator_delegates_every_slot_to_shared_executor() -> None:
+    """规则仿真器不得再自行审计、修复或执行SFC。"""
+
+    simulator = build_test_simulator(
+        controller=build_rule_controller(),
+        risk=0.20,
+        use_spy_executor=True,
+    )
+    result = simulator.run()
+    spy_executor = simulator.fast_slot_executor
+
+    assert isinstance(spy_executor, SpyFastSlotExecutor)
+    assert spy_executor.call_count == len(result.records)
+    assert result.records[0].function_replica_node_ids == (
+        spy_executor.results[0].function_replica_node_ids
+    )
+    assert result.records[0].total_run_cost == pytest.approx(
+        spy_executor.results[0].run_cost
+    )
+    assert result.records[0].total_route_cost == pytest.approx(
+        spy_executor.results[0].route_cost
+    )
+    assert result.records[0].cloud_used is (
+        spy_executor.results[0].used_cloud
     )
 
 
