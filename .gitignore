@@ -12,6 +12,9 @@ venv/
 # IDE 配置
 .idea/
 
+# Codex 功能分支使用的隔离工作区
+.worktrees/
+
 # 实验输出
 results/logs/
 results/models/
