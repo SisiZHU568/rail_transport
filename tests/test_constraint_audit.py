@@ -1,5 +1,7 @@
 """测试快时隙约束审计器。"""
 
+import pytest
+
 from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     EdgeNode,
@@ -31,7 +33,16 @@ def build_auditor() -> SlotConstraintAuditor:
                 coverage_radius_m=1200.0,
             )
             for node_id in range(3)
-        ]
+        ],
+        cloud_node=EdgeNode(
+            node_id=3,
+            name="中心云",
+            node_type=NodeType.CLOUD,
+            cpu_capacity=1000.0,
+            memory_capacity_mb=5000.0,
+            reliability=0.999,
+            fault_domain=3,
+        ),
     )
     functions = [
         ServerlessFunction(
@@ -60,6 +71,7 @@ def build_auditor() -> SlotConstraintAuditor:
             0: 0.999,
             1: 0.999,
             2: 0.999,
+            3: 0.999,
         },
         minimum_distinct_fault_domains=1,
     )
@@ -158,3 +170,32 @@ def test_missing_function_is_reported_as_invalid_plan() -> None:
     assert audit.missing_function_ids == (1,)
     assert audit.replica_plan_valid is False
     assert audit.exact_sfc_reliability is None
+
+
+def test_cloud_candidate_is_audited_as_known_compute_node() -> None:
+    """中心云候选必须参与容量和可靠性审计，不能被当作未知节点。"""
+
+    audit = build_auditor().audit(
+        request_count=1,
+        expected_replica_count=1,
+        candidate_map={0: (3,), 1: (3,)},
+        selected_execution_node_ids=(3, 3),
+        request_success=True,
+        function_hot_node_ids={
+            0: (3,),
+            1: (3,),
+        },
+        cold_activated_pairs=set(),
+    )
+
+    assert audit.invalid_replica_node_ids == ()
+    assert audit.node_cpu_demand == {3: 120.0}
+    assert audit.node_memory_demand_mb == {
+        3: 1200.0
+    }
+    assert audit.resource_constraints_met is True
+    assert audit.replica_plan_valid is True
+    assert audit.exact_sfc_reliability == (
+        pytest.approx(0.998001)
+    )
+    assert audit.all_constraints_met is True

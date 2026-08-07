@@ -499,24 +499,33 @@ def build_windowed_markov_failure_process(
         for site in topology.sites
     }
 
-    if set(
-        fault_domain_availability
-    ) != topology_domain_ids:
+    missing_trackside_domain_ids = (
+        topology_domain_ids
+        - set(fault_domain_availability)
+    )
+
+    if missing_trackside_domain_ids:
         raise ValueError(
-            "故障域可靠性配置与拓扑不一致。"
+            "以下轨旁故障域缺少可靠性配置："
+            f"{sorted(missing_trackside_domain_ids)}。"
         )
 
+    # Task 6 接入云故障状态前，当前过程仍只管理轨旁站点。
+    # 配置可以提前包含云故障域，但这里只向旧构造器传入轨旁域。
     domain_failure_probabilities = {
         domain_id: (
             _failure_probability_from_availability(
-                availability=availability,
+                availability=(
+                    fault_domain_availability[
+                        domain_id
+                    ]
+                ),
                 recovery_probability=(
                     domain_recovery_probability
                 ),
             )
         )
-        for domain_id, availability
-        in fault_domain_availability.items()
+        for domain_id in topology_domain_ids
     }
 
     domain_recovery_probabilities = {

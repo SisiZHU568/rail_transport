@@ -40,8 +40,8 @@ class SlotConstraintAuditor:
         self.topology = topology
         self.reliability_model = reliability_model
         self.node_map = {
-            site.node.node_id: site.node
-            for site in topology.sites
+            node.node_id: node
+            for node in topology.compute_nodes
         }
 
     def _calculate_resource_demands(

@@ -48,6 +48,9 @@ node_resources:
   cloud_memory_mb: 65536.0
   cloud_reliability: 0.999
 
+  # 中心云使用独立故障域，避免被误建模为某个轨旁区域的一部分
+  cloud_fault_domain_id: 3
+
 train:
   # 列车初始位置，单位为米
   initial_position_m: 0.0
@@ -60,7 +63,7 @@ serverless:
   survival_slots: 20
 
   # 同一函数允许的最大副本数量
-  max_replicas: 2
+  max_replicas: 3
 
   # ============================================================
 # 容器保留策略对比实验参数
@@ -271,6 +274,10 @@ reliability:
       availability: 0.995
 
     - domain_id: 2
+      availability: 0.995
+
+    # 中心云独立故障域
+    - domain_id: 3
       availability: 0.999
 
   # ============================================================

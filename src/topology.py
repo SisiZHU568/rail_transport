@@ -84,7 +84,11 @@ class LinearRailTopology:
     5. 估算当前覆盖区剩余驻留时间。
     """
 
-    def __init__(self, sites: list[TracksideSite]) -> None:
+    def __init__(
+        self,
+        sites: list[TracksideSite],
+        cloud_node: EdgeNode | None = None,
+    ) -> None:
         """
         创建直线铁路拓扑。
 
@@ -92,6 +96,10 @@ class LinearRailTopology:
         ----------
         sites:
             所有轨旁 MEC 站点。
+
+        cloud_node:
+            可选中心云计算节点。中心云没有线路位置，
+            因此只进入计算节点集合，不进入 sites。
         """
 
         if len(sites) == 0:
@@ -115,6 +123,29 @@ class LinearRailTopology:
         if len(positions) != len(set(positions)):
             raise ValueError("两个轨旁 MEC 不能位于完全相同的位置。")
 
+        if (
+            cloud_node is not None
+            and cloud_node.node_type is not NodeType.CLOUD
+        ):
+            raise ValueError(
+                "中心云节点必须使用NodeType.CLOUD。"
+            )
+
+        trackside_node_ids = {
+            site.node.node_id
+            for site in self.sites
+        }
+        if (
+            cloud_node is not None
+            and cloud_node.node_id
+            in trackside_node_ids
+        ):
+            raise ValueError(
+                "中心云与轨旁MEC的节点编号不能重复。"
+            )
+
+        self.cloud_node = cloud_node
+
     @property
     def mec_count(self) -> int:
         """
@@ -122,6 +153,29 @@ class LinearRailTopology:
         """
 
         return len(self.sites)
+
+    @property
+    def compute_nodes(self) -> tuple[EdgeNode, ...]:
+        """返回可承载函数的轨旁 MEC，并在末尾附加中心云。"""
+
+        nodes = [
+            site.node
+            for site in self.sites
+        ]
+        if self.cloud_node is not None:
+            nodes.append(self.cloud_node)
+        return tuple(nodes)
+
+    def get_node(self, node_id: int) -> EdgeNode:
+        """根据编号查询任一轨旁或中心云计算节点。"""
+
+        for node in self.compute_nodes:
+            if node.node_id == node_id:
+                return node
+
+        raise KeyError(
+            f"没有找到 node_id={node_id} 的计算节点。"
+        )
 
     @property
     def route_start_m(self) -> float:
@@ -396,4 +450,34 @@ def build_linear_topology(
 
         sites.append(site)
 
-    return LinearRailTopology(sites)
+    cloud_node: EdgeNode | None = None
+
+    # 中心云是部署候选，但没有铁路位置和无线覆盖范围。
+    if bool(
+        config["topology"].get(
+            "include_cloud",
+            False,
+        )
+    ):
+        cloud_node = EdgeNode(
+            node_id=mec_count,
+            name="中心云",
+            node_type=NodeType.CLOUD,
+            cpu_capacity=config[
+                "node_resources"
+            ]["cloud_cpu_capacity"],
+            memory_capacity_mb=config[
+                "node_resources"
+            ]["cloud_memory_mb"],
+            reliability=config[
+                "node_resources"
+            ]["cloud_reliability"],
+            fault_domain=config[
+                "node_resources"
+            ]["cloud_fault_domain_id"],
+        )
+
+    return LinearRailTopology(
+        sites=sites,
+        cloud_node=cloud_node,
+    )

@@ -167,8 +167,8 @@ class FaultDomainReliabilityModel:
 
         # 检查拓扑中所有故障域是否都配置了可用率。
         topology_domain_ids = {
-            site.node.fault_domain
-            for site in topology.sites
+            node.fault_domain
+            for node in topology.compute_nodes
         }
 
         missing_domain_ids = (
@@ -251,11 +251,11 @@ class FaultDomainReliabilityModel:
         ] = {}
 
         for node_id in replica_node_ids:
-            site = self.topology.get_site(node_id)
+            node = self.topology.get_node(node_id)
 
-            domain_id = site.node.fault_domain
+            domain_id = node.fault_domain
             node_local_availability = (
-                site.node.reliability
+                node.reliability
             )
 
             domain_node_availabilities.setdefault(
@@ -484,8 +484,7 @@ class FaultDomainReliabilityModel:
         used_domain_ids = sorted(
             {
                 self.topology
-                .get_site(node_id)
-                .node
+                .get_node(node_id)
                 .fault_domain
                 for node_id in used_node_ids
             }
@@ -562,8 +561,7 @@ class FaultDomainReliabilityModel:
                 ):
                     node_availability = (
                         self.topology
-                        .get_site(node_id)
-                        .node
+                        .get_node(node_id)
                         .reliability
                     )
 
@@ -584,13 +582,11 @@ class FaultDomainReliabilityModel:
                 operational_nodes: set[int] = set()
 
                 for node_id in used_node_ids:
-                    site = self.topology.get_site(
+                    node = self.topology.get_node(
                         node_id
                     )
 
-                    domain_id = (
-                        site.node.fault_domain
-                    )
+                    domain_id = node.fault_domain
 
                     node_is_operational = (
                         domain_states[domain_id]

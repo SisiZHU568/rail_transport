@@ -201,3 +201,50 @@ def test_cross_domain_plan_meets_reliability_target() -> None:
 
     assert result.fault_domain_diversity_met is True
     assert result.target_met is True
+
+
+def test_edge_cloud_replicas_use_independent_fault_domains() -> None:
+    """轨旁 MEC 与中心云副本必须共同进入精确可靠性模型。"""
+
+    model = build_test_model()
+    cloud_node = model.topology.cloud_node
+
+    assert cloud_node is not None
+
+    result = model.evaluate_function(
+        function_id=0,
+        replica_node_ids=[
+            0,
+            cloud_node.node_id,
+        ],
+    )
+
+    assert result.fault_domain_ids == (0, 3)
+    assert result.distinct_fault_domain_count == 2
+    assert result.fault_domain_diversity_met is True
+    assert result.availability == pytest.approx(
+        0.9999502249
+    )
+
+
+def test_cloud_only_sfc_uses_cloud_domain_and_node_reliability() -> None:
+    """三个函数共享云节点时，精确可靠性只计算一次云故障。"""
+
+    model = build_test_model()
+    cloud_node = model.topology.cloud_node
+    assert cloud_node is not None
+
+    result = model.evaluate_sfc(
+        sfc=build_test_sfc(),
+        function_replica_node_ids={
+            0: (cloud_node.node_id,),
+            1: (cloud_node.node_id,),
+            2: (cloud_node.node_id,),
+        },
+    )
+
+    assert (
+        result.exact_shared_failure_availability
+        == pytest.approx(0.998001)
+    )
+    assert result.fault_domain_diversity_met is False
