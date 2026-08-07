@@ -4,31 +4,111 @@ rl_reward.py
 
 本文件定义双时间尺度强化学习环境的奖励函数。
 
-奖励函数同时考虑：
+正式 DDQN 将使用简化奖励：
 
-1. 用户端到端时延；
-2. 温实例内存占用；
-3. 冷备用启动时延；
-4. SLA违反率；
-5. 副本重配置开销。
+    total_cost = run_cost + route_cost + cold_start_cost
+    reward = -(normalized_total_cost + violation_penalty)
 
-所有指标先归一化到[0,1]，
-再计算加权成本。
-
-最终奖励：
-
-    reward = -normalized_cost
-
-因此：
-
-    最好情况接近 0
-    最差情况接近 -1
+旧的五权重奖励接口暂时保留，供尚未迁移的 RL 环境使用；
+环境在后续原子迁移完成后会删除旧接口。
 """
 
 from dataclasses import dataclass
 import math
 
 
+@dataclass(frozen=True)
+class RLWindowCostMetrics:
+    """保存一个慢窗口内直接计价的三个成本和违约标志。"""
+
+    run_cost: float
+    route_cost: float
+    cold_start_cost: float
+    has_violation: bool
+
+    def __post_init__(self) -> None:
+        """拒绝会破坏奖励稳定性的负成本或非有限成本。"""
+
+        values = (
+            self.run_cost,
+            self.route_cost,
+            self.cold_start_cost,
+        )
+        if any(
+            not math.isfinite(value)
+            or value < 0
+            for value in values
+        ):
+            raise ValueError(
+                "窗口成本必须是非负有限值。"
+            )
+
+
+@dataclass(frozen=True)
+class RLCostRewardBreakdown:
+    """保存简化奖励的原始成本、归一化结果和最终奖励。"""
+
+    run_cost: float
+    route_cost: float
+    cold_start_cost: float
+    total_cost: float
+    normalized_total_cost: float
+    violation_penalty: float
+    reward: float
+
+
+def calculate_cost_reward(
+    metrics: RLWindowCostMetrics,
+    maximum_window_cost: float,
+) -> RLCostRewardBreakdown:
+    """按“归一化总成本 + 单一违约项”计算慢窗口奖励。"""
+
+    if (
+        not math.isfinite(maximum_window_cost)
+        or maximum_window_cost <= 0
+    ):
+        raise ValueError(
+            "窗口最大成本必须是正有限值。"
+        )
+
+    total_cost = (
+        metrics.run_cost
+        + metrics.route_cost
+        + metrics.cold_start_cost
+    )
+
+    # 极端窗口的成本统一截断为 1，避免个别异常值主导训练。
+    normalized_total_cost = min(
+        total_cost / maximum_window_cost,
+        1.0,
+    )
+
+    # 资源、可靠性和 SLA 约束统一折叠为一个二值硬违约项，
+    # 不再为每种约束分别引入需要调优的奖励权重。
+    violation_penalty = (
+        1.0 if metrics.has_violation else 0.0
+    )
+    reward = -(
+        normalized_total_cost
+        + violation_penalty
+    )
+
+    return RLCostRewardBreakdown(
+        run_cost=metrics.run_cost,
+        route_cost=metrics.route_cost,
+        cold_start_cost=(
+            metrics.cold_start_cost
+        ),
+        total_cost=total_cost,
+        normalized_total_cost=(
+            normalized_total_cost
+        ),
+        violation_penalty=violation_penalty,
+        reward=reward,
+    )
+
+
+# 以下接口是旧 RL 环境的迁移期兼容代码。
 @dataclass(frozen=True)
 class RLRewardWeights:
     """
