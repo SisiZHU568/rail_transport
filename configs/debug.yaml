@@ -139,6 +139,18 @@ network:
   # 数据每经过一个 MEC 跳数产生的传播与转发时延
   propagation_delay_per_hop_ms: 2.0
 
+  # 轨旁数据每传输 1 MB、每经过一跳产生的经济成本
+  edge_data_cost_per_mb_hop: 0.01
+
+  # 轨旁 MEC 到中心云的回传链路带宽，单位为 Mbps
+  cloud_backhaul_bandwidth_mbps: 500.0
+
+  # 轨旁 MEC 到中心云的单向固定传播时延，单位为毫秒
+  cloud_one_way_propagation_delay_ms: 40.0
+
+  # 每向中心云发送或从中心云返回 1 MB 数据产生的成本
+  cloud_data_cost_per_mb: 0.20
+
 sfc_demo:
   # 原始数据最开始位于哪个 MEC。
   # 这里设为 MEC-1，其 node_id 为 0。

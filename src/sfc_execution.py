@@ -19,7 +19,7 @@ sfc_execution.py
 from dataclasses import dataclass,replace
 
 from src.entities import ServerlessFunction, SFCType
-from src.network import LinearMECNetwork
+from src.network import TransferNetworkProtocol
 
 
 @dataclass(frozen=True)
@@ -104,6 +104,9 @@ class SFCExecutionResult:
     # 全部函数间传输和返回传输的总时延
     total_transmission_delay_ms: float
 
+    # 输入、函数间和结果返回产生的总数据传输成本
+    total_routing_cost: float
+
     # 所有函数的冷启动总时延
     total_cold_start_delay_ms: float
 
@@ -126,7 +129,7 @@ def execute_sfc_request(
     placement_node_ids: list[int],
     source_node_id: int,
     input_size_mb: float,
-    network: LinearMECNetwork,
+    network: TransferNetworkProtocol,
     cold_start_function_ids: set[int] | None = None,
     return_result_to_source: bool = True,
 ) -> SFCExecutionResult:
@@ -162,7 +165,7 @@ def execute_sfc_request(
         SFC 原始输入数据量。
 
     network:
-        轨旁 MEC 网络模型。
+        实现统一传输接口的轨旁或边缘—云网络模型。
 
     cold_start_function_ids:
         当前请求执行时需要冷启动的函数编号集合。
@@ -216,8 +219,10 @@ def execute_sfc_request(
                 f"找不到 function_id={function_id} 的函数。"
             )
 
-    # 检查源节点是否存在。
-    network.hop_count(
+    # 通过零数据同节点传输检查源节点是否存在。
+    # 公共网络接口不要求中心云具有轨道跳数。
+    network.transfer_delay_ms(
+        data_size_mb=0.0,
         source_node_id=source_node_id,
         destination_node_id=source_node_id,
     )
@@ -228,6 +233,7 @@ def execute_sfc_request(
     current_data_size_mb = input_size_mb
 
     total_transmission_delay_ms = 0.0
+    total_routing_cost = 0.0
     total_cold_start_delay_ms = 0.0
     total_execution_delay_ms = 0.0
 
@@ -243,6 +249,11 @@ def execute_sfc_request(
 
         # 将上一个阶段产生的数据传输到当前函数节点。
         transmission_delay_ms = network.transfer_delay_ms(
+            data_size_mb=current_data_size_mb,
+            source_node_id=current_node_id,
+            destination_node_id=destination_node_id,
+        )
+        routing_cost = network.transfer_cost(
             data_size_mb=current_data_size_mb,
             source_node_id=current_node_id,
             destination_node_id=destination_node_id,
@@ -288,6 +299,7 @@ def execute_sfc_request(
         total_transmission_delay_ms += (
             transmission_delay_ms
         )
+        total_routing_cost += routing_cost
 
         total_cold_start_delay_ms += (
             cold_start_delay_ms
@@ -314,12 +326,19 @@ def execute_sfc_request(
                 destination_node_id=source_node_id,
             )
         )
+        return_routing_cost = network.transfer_cost(
+            data_size_mb=current_data_size_mb,
+            source_node_id=current_node_id,
+            destination_node_id=source_node_id,
+        )
     else:
         return_transmission_delay_ms = 0.0
+        return_routing_cost = 0.0
 
     total_transmission_delay_ms += (
         return_transmission_delay_ms
     )
+    total_routing_cost += return_routing_cost
 
     total_end_to_end_delay_ms = (
         total_transmission_delay_ms
@@ -347,6 +366,7 @@ def execute_sfc_request(
         total_transmission_delay_ms=(
             total_transmission_delay_ms
         ),
+        total_routing_cost=total_routing_cost,
         total_cold_start_delay_ms=(
             total_cold_start_delay_ms
         ),
@@ -367,7 +387,7 @@ def execute_sfc_batch(
     source_node_id: int,
     input_size_mb_per_request: float,
     request_count: int,
-    network: LinearMECNetwork,
+    network: TransferNetworkProtocol,
     cold_start_function_ids: set[int] | None = None,
     return_result_to_source: bool = True,
 ) -> SFCExecutionResult:

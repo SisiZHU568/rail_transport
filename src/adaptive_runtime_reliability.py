@@ -39,7 +39,7 @@ from src.entities import (
 )
 from src.failure_process import FailureProcess
 from src.mobility import TrainMobilityModel
-from src.network import LinearMECNetwork
+from src.network import TransferNetworkProtocol
 from src.redundancy_placement import (
     ReplicaPlacementPlan,
 )
@@ -185,7 +185,7 @@ class AdaptiveStandbyRuntimeSimulator:
     def __init__(
         self,
         topology: LinearRailTopology,
-        network: LinearMECNetwork,
+        network: TransferNetworkProtocol,
         mobility_model: TrainMobilityModel,
         workload: DeterministicWorkload,
         functions: list[ServerlessFunction],

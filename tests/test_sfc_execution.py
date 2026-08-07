@@ -12,7 +12,10 @@ from src.entities import (
     ServicePriority,
     SFCType,
 )
-from src.network import build_linear_mec_network
+from src.network import (
+    build_hybrid_rail_network,
+    build_linear_mec_network,
+)
 from src.sfc_execution import (
     execute_sfc_request, 
     execute_sfc_batch,
@@ -88,6 +91,17 @@ def build_test_network():
     )
 
 
+def build_test_hybrid_network():
+    """创建能够计算云回传开销的测试网络。"""
+
+    config = load_config("configs/debug.yaml")
+    topology = build_linear_topology(config)
+    return build_hybrid_rail_network(
+        config=config,
+        topology=topology,
+    )
+
+
 def test_local_warm_sfc_execution() -> None:
     """
     三个函数都位于 MEC-1，且都是温实例。
@@ -109,6 +123,7 @@ def test_local_warm_sfc_execution() -> None:
     )
 
     assert result.total_transmission_delay_ms == 0.0
+    assert result.total_routing_cost == 0.0
     assert result.total_cold_start_delay_ms == 0.0
     assert result.total_execution_delay_ms == 95.0
     assert result.total_end_to_end_delay_ms == 95.0
@@ -157,6 +172,10 @@ def test_distributed_warm_sfc_execution() -> None:
 
     assert result.total_transmission_delay_ms == pytest.approx(
         24.128
+    )
+
+    assert result.total_routing_cost == pytest.approx(
+        0.02072
     )
 
     assert result.total_execution_delay_ms == 95.0
@@ -265,4 +284,26 @@ def test_local_warm_batch_execution() -> None:
 
     assert result.total_end_to_end_delay_ms == pytest.approx(
         190.0
+    )
+
+
+def test_sfc_execution_reports_cloud_routing_cost() -> None:
+    """SFC 的输入、函数间和返回传输都必须累计路由成本。"""
+
+    result = execute_sfc_request(
+        functions=build_test_functions(),
+        sfc=build_test_sfc(),
+        placement_node_ids=[0, 5, 5],
+        source_node_id=0,
+        input_size_mb=2.0,
+        network=build_test_hybrid_network(),
+    )
+
+    # 1.4 MB 从 MEC-1 传到云端，最终 0.056 MB 返回 MEC-1。
+    expected_cost = (
+        1.4 * 0.20
+        + 0.056 * 0.20
+    )
+    assert result.total_routing_cost == pytest.approx(
+        expected_cost
     )

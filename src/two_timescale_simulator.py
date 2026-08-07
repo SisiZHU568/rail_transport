@@ -60,7 +60,7 @@ from src.failure_risk_prediction import (
     FailureRiskProvider,
 )
 from src.mobility import TrainMobilityModel
-from src.network import LinearMECNetwork
+from src.network import TransferNetworkProtocol
 from src.redundancy_placement import (
     ReplicaPlacementPlan,
 )
@@ -297,7 +297,7 @@ class TwoTimescaleRuntimeSimulator:
     def __init__(
         self,
         topology: LinearRailTopology,
-        network: LinearMECNetwork,
+        network: TransferNetworkProtocol,
         mobility_model: TrainMobilityModel,
         workload: DeterministicWorkload,
         functions: list[ServerlessFunction],
