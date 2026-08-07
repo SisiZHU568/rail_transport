@@ -1,0 +1,567 @@
+"""训练环境与规则仿真器共用的单快时隙执行闭环。"""
+
+from dataclasses import dataclass
+import math
+
+from src.constraint_audit import SlotConstraintAuditor
+from src.entities import (
+    NodeType,
+    ServerlessFunction,
+    SFCType,
+    SlotConstraintAudit,
+    TrainState,
+)
+from src.failure_process import InfrastructureState
+from src.fast_optimizer import FastFeasibilityOptimizer
+from src.network import TransferNetworkProtocol
+from src.rl_agent_action_space import RetentionPolicy
+from src.runtime_reliability import (
+    ReplicaPlannerProtocol,
+    SingleReplicaPlanner,
+)
+from src.sfc_execution import execute_sfc_batch
+from src.topology import LinearRailTopology
+from src.two_timescale_control import (
+    FastTimescaleDecision,
+    FastTimescaleState,
+    SlowTimescaleDecision,
+    build_fast_decision_for_plan,
+)
+
+
+@dataclass(frozen=True)
+class RuntimeCostRates:
+    """保存快时隙三类原始成本使用的单位价格。"""
+
+    edge_cpu_cost_per_unit: float
+    edge_memory_cost_per_mb_second: float
+    cloud_cpu_cost_per_unit: float
+    cloud_memory_cost_per_mb_second: float
+    cold_start_cost_per_ms: float
+
+    def __post_init__(self) -> None:
+        """成本单价必须是可用于稳定训练的非负有限数。"""
+
+        values = (
+            self.edge_cpu_cost_per_unit,
+            self.edge_memory_cost_per_mb_second,
+            self.cloud_cpu_cost_per_unit,
+            self.cloud_memory_cost_per_mb_second,
+            self.cold_start_cost_per_ms,
+        )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in values
+        ):
+            raise ValueError("快时隙成本单价必须是非负有限值。")
+
+
+@dataclass(frozen=True)
+class FastSlotInput:
+    """保存执行一个快时隙所需的全部动态输入。"""
+
+    train_state: TrainState
+    request_count: int
+    infrastructure_state: InfrastructureState
+    slow_decision: SlowTimescaleDecision
+    previous_candidate_map: (
+        dict[int, tuple[int, ...]] | None
+    )
+
+    def __post_init__(self) -> None:
+        """在闭环入口拒绝没有物理意义的负请求数量。"""
+
+        if self.request_count < 0:
+            raise ValueError("快时隙请求数量不能小于0。")
+
+
+@dataclass(frozen=True)
+class FastSlotExecutionResult:
+    """保存快层规划、修复、执行和计费的完整结果。"""
+
+    function_replica_node_ids: dict[int, tuple[int, ...]]
+    function_hot_node_ids: dict[int, tuple[int, ...]]
+    selected_execution_node_ids: tuple[int, ...]
+    initial_audit: SlotConstraintAudit
+    final_audit: SlotConstraintAudit
+    fast_repair_attempted: bool
+    fast_repair_succeeded: bool | None
+    fast_repair_reason: str
+    request_success: bool | None
+    deadline_met: bool | None
+    end_to_end_delay_ms: float | None
+    cold_start_delay_ms: float
+    active_memory_mb: float
+    plan_change_count: int
+    used_cloud: bool
+    constraint_rejected: bool
+    run_cost: float
+    route_cost: float
+    cold_start_cost: float
+
+    # 以下明细供规则仿真器原样记录，避免调用方根据汇总值二次推断。
+    backup_activation_triggered: bool = False
+    failover_function_ids: tuple[int, ...] = ()
+    cold_start_function_ids: tuple[int, ...] = ()
+    unavailable_function_ids: tuple[int, ...] = ()
+    transmission_delay_ms: float | None = None
+    execution_delay_ms: float | None = None
+    failover_delay_ms: float = 0.0
+    active_instance_count: int = 0
+    fast_repair_evaluated_candidate_count: int = 0
+
+    @property
+    def total_cost(self) -> float:
+        """返回奖励函数使用的总原始成本，不在这里添加权重。"""
+
+        return (
+            self.run_cost
+            + self.route_cost
+            + self.cold_start_cost
+        )
+
+
+class FastSlotExecutor:
+    """执行一次“规划—审计—修复—可行后执行”的快层闭环。"""
+
+    def __init__(
+        self,
+        topology: LinearRailTopology,
+        network: TransferNetworkProtocol,
+        functions: list[ServerlessFunction],
+        sfc: SFCType,
+        replica_planners: dict[int, ReplicaPlannerProtocol],
+        constraint_auditor: SlotConstraintAuditor,
+        fast_optimizer: FastFeasibilityOptimizer,
+        input_size_mb_per_request: float,
+        slot_seconds: float,
+        handover_hot_window_s: float,
+        failover_delay_ms_per_function: float,
+        cost_rates: RuntimeCostRates,
+        return_result_to_source: bool = True,
+    ) -> None:
+        """保存快时隙闭环所需的唯一一组依赖。"""
+
+        if set(replica_planners) != {1, 2, 3}:
+            raise ValueError(
+                "副本规划器必须且只能提供1、2、3副本三个入口。"
+            )
+
+        nonnegative_values = (
+            input_size_mb_per_request,
+            handover_hot_window_s,
+            failover_delay_ms_per_function,
+        )
+        if any(
+            not math.isfinite(value) or value < 0
+            for value in nonnegative_values
+        ):
+            raise ValueError(
+                "输入数据量、预热窗口和故障切换时延必须是非负有限值。"
+            )
+        if not math.isfinite(slot_seconds) or slot_seconds <= 0:
+            raise ValueError("快时隙长度必须是正有限值。")
+
+        self.topology = topology
+        self.network = network
+        self.functions = list(functions)
+        self.function_map = {
+            function.function_id: function
+            for function in self.functions
+        }
+        if len(self.function_map) != len(self.functions):
+            raise ValueError("Serverless函数编号不能重复。")
+        if set(self.function_map) != set(sfc.function_ids):
+            raise ValueError("函数列表必须与SFC函数集合完全一致。")
+
+        self.sfc = sfc
+        self.replica_planners = dict(replica_planners)
+        self.constraint_auditor = constraint_auditor
+        self.fast_optimizer = fast_optimizer
+        self.input_size_mb_per_request = (
+            input_size_mb_per_request
+        )
+        self.slot_seconds = slot_seconds
+        self.handover_hot_window_s = handover_hot_window_s
+        self.failover_delay_ms_per_function = (
+            failover_delay_ms_per_function
+        )
+        self.cost_rates = cost_rates
+        self.return_result_to_source = return_result_to_source
+        self.node_map = {
+            node.node_id: node
+            for node in topology.compute_nodes
+        }
+        self.cloud_node_id = (
+            None
+            if topology.cloud_node is None
+            else topology.cloud_node.node_id
+        )
+
+    def _build_candidate_map(
+        self,
+        slot_input: FastSlotInput,
+    ) -> dict[int, tuple[int, ...]]:
+        """按慢动作的副本数选择唯一对应的副本规划器。"""
+
+        replica_count = slot_input.slow_decision.replica_count
+        if replica_count not in self.replica_planners:
+            raise ValueError(
+                f"共享执行器只支持1至3副本，收到{replica_count}。"
+            )
+
+        plan = self.replica_planners[replica_count].plan(
+            sfc=self.sfc,
+            train_state=slot_input.train_state,
+            topology=self.topology,
+        )
+        candidate_map = {
+            function_id: tuple(node_ids)
+            for function_id, node_ids
+            in plan.function_replica_node_ids.items()
+        }
+        if set(candidate_map) != set(self.sfc.function_ids):
+            raise ValueError("副本计划与SFC函数集合不一致。")
+
+        return candidate_map
+
+    def _operational_node_ids(
+        self,
+        infrastructure_state: InfrastructureState,
+    ) -> frozenset[int]:
+        """同时检查轨旁MEC和中心云的局部、故障域两层状态。"""
+
+        return frozenset(
+            node.node_id
+            for node in self.topology.compute_nodes
+            if infrastructure_state.is_node_operational(
+                node_id=node.node_id,
+                topology=self.topology,
+            )
+        )
+
+    def _cold_activated_pairs(
+        self,
+        decision: FastTimescaleDecision,
+    ) -> set[tuple[int, int]]:
+        """把发生冷启动的函数编号还原为函数—执行节点对。"""
+
+        if decision.request_success is not True:
+            return set()
+
+        selected_by_function = dict(
+            zip(
+                self.sfc.function_ids,
+                decision.selected_execution_node_ids,
+            )
+        )
+        return {
+            (function_id, selected_by_function[function_id])
+            for function_id in decision.cold_start_function_ids
+        }
+
+    def _audit(
+        self,
+        *,
+        request_count: int,
+        replica_count: int,
+        candidate_map: dict[int, tuple[int, ...]],
+        decision: FastTimescaleDecision,
+    ) -> SlotConstraintAudit:
+        """用同一参数口径审计初始方案和修复候选方案。"""
+
+        return self.constraint_auditor.audit(
+            request_count=request_count,
+            expected_replica_count=replica_count,
+            candidate_map=candidate_map,
+            selected_execution_node_ids=(
+                decision.selected_execution_node_ids
+            ),
+            request_success=decision.request_success,
+            function_hot_node_ids=(
+                decision.function_hot_node_ids
+            ),
+            cold_activated_pairs=(
+                self._cold_activated_pairs(decision)
+            ),
+        )
+
+    def _count_plan_changes(
+        self,
+        previous_map: dict[int, tuple[int, ...]] | None,
+        current_map: dict[int, tuple[int, ...]],
+    ) -> int:
+        """统计部署发生变化的函数数，首时隙视为初始部署。"""
+
+        if previous_map is None:
+            return len(self.sfc.function_ids)
+        if set(previous_map) != set(self.sfc.function_ids):
+            raise ValueError("上一时隙副本计划与SFC函数集合不一致。")
+
+        return sum(
+            previous_map[function_id]
+            != current_map[function_id]
+            for function_id in self.sfc.function_ids
+        )
+
+    def _node_cost_rates(
+        self,
+        node_id: int,
+    ) -> tuple[float, float]:
+        """根据节点类型返回CPU和内存单价。"""
+
+        node = self.node_map[node_id]
+        if node.node_type is NodeType.CLOUD:
+            return (
+                self.cost_rates.cloud_cpu_cost_per_unit,
+                self.cost_rates.cloud_memory_cost_per_mb_second,
+            )
+        return (
+            self.cost_rates.edge_cpu_cost_per_unit,
+            self.cost_rates.edge_memory_cost_per_mb_second,
+        )
+
+    def _calculate_run_cost(
+        self,
+        audit: SlotConstraintAudit,
+    ) -> float:
+        """用最终审计中的真实CPU、内存需求计算运行成本。"""
+
+        run_cost = 0.0
+        demand_node_ids = (
+            set(audit.node_cpu_demand)
+            | set(audit.node_memory_demand_mb)
+        )
+        for node_id in demand_node_ids:
+            # 未知节点已经由审计器判为违规；不可行方案仍需正常
+            # 返回拒绝结果，因此这里跳过无法计价的未知节点。
+            if node_id not in self.node_map:
+                continue
+            cpu_rate, memory_rate = self._node_cost_rates(node_id)
+            run_cost += (
+                audit.node_cpu_demand.get(node_id, 0.0)
+                * cpu_rate
+            )
+            run_cost += (
+                audit.node_memory_demand_mb.get(node_id, 0.0)
+                * self.slot_seconds
+                * memory_rate
+            )
+
+        return run_cost
+
+    def execute(
+        self,
+        slot_input: FastSlotInput,
+    ) -> FastSlotExecutionResult:
+        """执行一个快时隙；最终约束不满足时只拒绝、不运行SFC。"""
+
+        train_state = slot_input.train_state
+        if (
+            slot_input.infrastructure_state.time_slot
+            != train_state.time_slot
+        ):
+            raise ValueError("基础设施状态与列车状态不属于同一时隙。")
+
+        candidate_map = self._build_candidate_map(slot_input)
+        operational_node_ids = self._operational_node_ids(
+            slot_input.infrastructure_state
+        )
+        fast_state = FastTimescaleState(
+            time_slot=train_state.time_slot,
+            serving_mec=train_state.serving_mec,
+            remaining_dwell_time_s=(
+                train_state.remaining_dwell_time_s
+            ),
+            request_count=slot_input.request_count,
+            function_ids=tuple(self.sfc.function_ids),
+            candidate_node_ids=candidate_map,
+            operational_node_ids=operational_node_ids,
+        )
+
+        # PRIMARY_WARM只在临近切换且确实存在备用副本时临时预热。
+        backup_activation_triggered = (
+            slot_input.slow_decision.retention_policy
+            is RetentionPolicy.PRIMARY_WARM
+            and slot_input.slow_decision.use_redundancy
+            and train_state.remaining_dwell_time_s
+            <= self.handover_hot_window_s
+        )
+        initial_decision = build_fast_decision_for_plan(
+            state=fast_state,
+            retention_policy=(
+                slot_input.slow_decision.retention_policy
+            ),
+            backup_activation_triggered=(
+                backup_activation_triggered
+            ),
+        )
+        initial_audit = self._audit(
+            request_count=slot_input.request_count,
+            replica_count=(
+                slot_input.slow_decision.replica_count
+            ),
+            candidate_map=candidate_map,
+            decision=initial_decision,
+        )
+        optimization = self.fast_optimizer.optimize(
+            state=fast_state,
+            slow_decision=slot_input.slow_decision,
+            initial_decision=initial_decision,
+            initial_audit=initial_audit,
+        )
+
+        # 后续执行、SLA、资源和成本只能读取优化器给出的最终方案。
+        final_candidate_map = dict(
+            optimization.function_replica_node_ids
+        )
+        final_decision = optimization.decision
+        final_audit = optimization.final_audit
+        constraint_rejected = (
+            optimization.succeeded is False
+            or not final_audit.all_constraints_met
+            or (
+                slot_input.request_count > 0
+                and final_decision.request_success is not True
+            )
+        )
+
+        end_to_end_delay_ms: float | None = None
+        deadline_met: bool | None = None
+        transmission_delay_ms: float | None = None
+        execution_delay_ms: float | None = None
+        cold_start_delay_ms = 0.0
+        failover_delay_ms = 0.0
+        route_cost = 0.0
+
+        # 这是安全边界：只有最终审计可行且执行路径完整，才调用
+        # 真实SFC执行器，杜绝“先执行、后发现约束违规”。
+        if (
+            not constraint_rejected
+            and final_decision.request_success is True
+        ):
+            sfc_result = execute_sfc_batch(
+                functions=self.functions,
+                sfc=self.sfc,
+                placement_node_ids=list(
+                    final_decision.selected_execution_node_ids
+                ),
+                source_node_id=train_state.serving_mec,
+                input_size_mb_per_request=(
+                    self.input_size_mb_per_request
+                ),
+                request_count=slot_input.request_count,
+                network=self.network,
+                cold_start_function_ids=set(
+                    final_decision.cold_start_function_ids
+                ),
+                return_result_to_source=(
+                    self.return_result_to_source
+                ),
+            )
+            transmission_delay_ms = (
+                sfc_result.total_transmission_delay_ms
+            )
+            execution_delay_ms = (
+                sfc_result.total_execution_delay_ms
+            )
+            failover_delay_ms = (
+                len(final_decision.failover_function_ids)
+                * self.failover_delay_ms_per_function
+            )
+            end_to_end_delay_ms = (
+                sfc_result.total_end_to_end_delay_ms
+                + failover_delay_ms
+            )
+            deadline_met = (
+                end_to_end_delay_ms <= self.sfc.deadline_ms
+            )
+            cold_start_delay_ms = (
+                sfc_result.total_cold_start_delay_ms
+            )
+            route_cost = sfc_result.total_routing_cost
+
+        active_pairs = {
+            (function_id, node_id)
+            for function_id, node_ids
+            in final_decision.function_hot_node_ids.items()
+            for node_id in node_ids
+        }
+        active_pairs.update(
+            self._cold_activated_pairs(final_decision)
+        )
+        active_memory_mb = sum(
+            self.function_map[function_id].memory_mb
+            for function_id, _ in active_pairs
+        )
+        run_cost = self._calculate_run_cost(final_audit)
+        cold_start_cost = (
+            cold_start_delay_ms
+            * self.cost_rates.cold_start_cost_per_ms
+        )
+        used_cloud = (
+            self.cloud_node_id is not None
+            and any(
+                self.cloud_node_id in node_ids
+                for node_ids in final_candidate_map.values()
+            )
+        )
+
+        return FastSlotExecutionResult(
+            function_replica_node_ids=final_candidate_map,
+            function_hot_node_ids=dict(
+                final_decision.function_hot_node_ids
+            ),
+            selected_execution_node_ids=(
+                final_decision.selected_execution_node_ids
+            ),
+            initial_audit=optimization.initial_audit,
+            final_audit=final_audit,
+            fast_repair_attempted=optimization.attempted,
+            fast_repair_succeeded=optimization.succeeded,
+            fast_repair_reason=optimization.reason,
+            request_success=final_decision.request_success,
+            deadline_met=deadline_met,
+            end_to_end_delay_ms=end_to_end_delay_ms,
+            cold_start_delay_ms=cold_start_delay_ms,
+            active_memory_mb=active_memory_mb,
+            plan_change_count=self._count_plan_changes(
+                previous_map=slot_input.previous_candidate_map,
+                current_map=final_candidate_map,
+            ),
+            used_cloud=used_cloud,
+            constraint_rejected=constraint_rejected,
+            run_cost=run_cost,
+            route_cost=route_cost,
+            cold_start_cost=cold_start_cost,
+            backup_activation_triggered=(
+                final_decision.backup_activation_triggered
+            ),
+            failover_function_ids=(
+                final_decision.failover_function_ids
+            ),
+            cold_start_function_ids=(
+                final_decision.cold_start_function_ids
+            ),
+            unavailable_function_ids=(
+                final_decision.unavailable_function_ids
+            ),
+            transmission_delay_ms=transmission_delay_ms,
+            execution_delay_ms=execution_delay_ms,
+            failover_delay_ms=failover_delay_ms,
+            active_instance_count=len(active_pairs),
+            fast_repair_evaluated_candidate_count=(
+                optimization.evaluated_candidate_count
+            ),
+        )
+
+
+# 在本模块保留统一来源的单副本规划器符号，便于两个调用方
+# 使用同一个定义；这里没有重新声明新的规划器或Protocol。
+__all__ = [
+    "FastSlotExecutionResult",
+    "FastSlotExecutor",
+    "FastSlotInput",
+    "RuntimeCostRates",
+    "SingleReplicaPlanner",
+]
