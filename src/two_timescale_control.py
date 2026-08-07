@@ -350,7 +350,7 @@ class FastTimescaleDecision:
 
 def build_fast_decision_for_plan(
     state: FastTimescaleState,
-    standby_mode: StandbyMode,
+    retention_policy: RetentionPolicy,
     backup_activation_triggered: bool,
     previously_hot_node_ids: (
         dict[int, tuple[int, ...]] | None
@@ -372,22 +372,25 @@ def build_fast_decision_for_plan(
             function_id
         ]
 
-        # 单副本模式只允许使用计划中的第一个节点；
-        # 冷备和热备模式可以在主节点故障时依次选择备用节点。
-        usable_candidate_nodes = (
-            (all_candidate_nodes[0],)
-            if standby_mode is StandbyMode.SINGLE
-            else all_candidate_nodes
-        )
+        # 副本数量已经由慢层模板和候选图确定；快层只在这些
+        # 计划副本中选择执行节点，不能自行增删副本。
+        usable_candidate_nodes = all_candidate_nodes
         primary_node_id = usable_candidate_nodes[0]
 
-        # HOT模式或切换窗口已经触发备用激活时，
-        # 计划中的全部可用副本都占用活动实例内存。
-        if (
-            standby_mode is StandbyMode.HOT
-            or backup_activation_triggered
+        if retention_policy is RetentionPolicy.ON_DEMAND:
+            # 按需策略不提前保留容器，包括主副本也需要冷启动。
+            hot_node_ids: tuple[int, ...] = ()
+        elif (
+            retention_policy
+            is RetentionPolicy.ALL_WARM
         ):
             hot_node_ids = tuple(usable_candidate_nodes)
+        elif backup_activation_triggered:
+            # PRIMARY_WARM在切换窗口只额外激活第一个备用，
+            # 三副本时不会把第二个备用也误当成常驻温实例。
+            hot_node_ids = tuple(
+                usable_candidate_nodes[:2]
+            )
         else:
             hot_node_ids = (primary_node_id,)
 
@@ -720,9 +723,8 @@ class RuleBasedTwoTimescaleController:
 
         return build_fast_decision_for_plan(
             state=state,
-            standby_mode=retention_policy_to_legacy_mode(
-                slow_decision.retention_policy,
-                slow_decision.replica_count,
+            retention_policy=(
+                slow_decision.retention_policy
             ),
             backup_activation_triggered=(
                 backup_activation_triggered
@@ -913,9 +915,8 @@ class FixedModeTwoTimescaleController:
 
         return build_fast_decision_for_plan(
             state=state,
-            standby_mode=retention_policy_to_legacy_mode(
-                slow_decision.retention_policy,
-                slow_decision.replica_count,
+            retention_policy=(
+                slow_decision.retention_policy
             ),
             backup_activation_triggered=(
                 backup_activation_triggered

@@ -152,6 +152,73 @@ def build_slow_decision(
     )
 
 
+@pytest.mark.parametrize(
+    (
+        "retention_policy",
+        "handover_activation",
+        "expected_hot_nodes",
+        "expected_cold_functions",
+    ),
+    [
+        (
+            RetentionPolicy.ON_DEMAND,
+            False,
+            (),
+            (0, 1),
+        ),
+        (
+            RetentionPolicy.PRIMARY_WARM,
+            True,
+            (0, 2),
+            (),
+        ),
+        (
+            RetentionPolicy.ALL_WARM,
+            False,
+            (0, 2, 3),
+            (),
+        ),
+    ],
+)
+def test_retention_policy_controls_exact_hot_set(
+    retention_policy: RetentionPolicy,
+    handover_activation: bool,
+    expected_hot_nodes: tuple[int, ...],
+    expected_cold_functions: tuple[int, ...],
+) -> None:
+    """三种保留策略必须产生不同且可解释的温实例集合。"""
+
+    state = FastTimescaleState(
+        time_slot=1,
+        serving_mec=0,
+        remaining_dwell_time_s=2.0,
+        request_count=1,
+        function_ids=(0, 1),
+        candidate_node_ids={
+            0: (0, 2, 3),
+            1: (0, 2, 3),
+        },
+        operational_node_ids=frozenset({0, 2, 3}),
+    )
+
+    decision = build_fast_decision_for_plan(
+        state=state,
+        retention_policy=retention_policy,
+        backup_activation_triggered=(
+            handover_activation
+        ),
+    )
+
+    assert decision.function_hot_node_ids == {
+        0: expected_hot_nodes,
+        1: expected_hot_nodes,
+    }
+    assert (
+        decision.cold_start_function_ids
+        == expected_cold_functions
+    )
+
+
 def test_repaired_primary_that_was_not_hot_requires_cold_start() -> None:
     """修复器迁移主节点后，新节点未预热时必须计入冷启动。"""
 
@@ -167,7 +234,9 @@ def test_repaired_primary_that_was_not_hot_requires_cold_start() -> None:
 
     decision = build_fast_decision_for_plan(
         state=state,
-        standby_mode=StandbyMode.SINGLE,
+        retention_policy=(
+            RetentionPolicy.PRIMARY_WARM
+        ),
         backup_activation_triggered=False,
         previously_hot_node_ids={0: (0,)},
     )

@@ -390,7 +390,7 @@ class TwoTimescaleRuntimeSimulator:
             failure_risk_provider
         )
 
-        # 修复器的距离评分需要知道结果是否返回当前接入MEC，
+        # 修复器的传输成本需要知道结果是否返回当前接入MEC，
         # 因此必须在创建修复器之前保存该配置。
         self.return_result_to_source = (
             return_result_to_source
@@ -416,6 +416,24 @@ class TwoTimescaleRuntimeSimulator:
             return_result_to_source=(
                 self.return_result_to_source
             ),
+            network=network,
+            # 旧规则模拟器没有单独的CPU计价参数，先保持为0；
+            # 下一步共享执行器会统一接入新的边缘/云成本率对象。
+            edge_cpu_cost_per_unit=0.0,
+            cloud_cpu_cost_per_unit=0.0,
+            edge_memory_cost_per_mb_second=(
+                cost_weights.memory_cost_per_mb_second
+            ),
+            cloud_memory_cost_per_mb_second=(
+                cost_weights.memory_cost_per_mb_second
+            ),
+            cold_start_cost_per_ms=(
+                cost_weights.cold_start_cost_per_ms
+            ),
+            input_size_mb_per_request=(
+                input_size_mb_per_request
+            ),
+            slot_seconds=slot_seconds,
         )
 
         self.prediction_horizon_slots = (

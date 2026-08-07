@@ -1,5 +1,7 @@
 """测试慢层模板约束下的确定性快层可行性修复。"""
 
+import pytest
+
 from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     EdgeNode,
@@ -12,7 +14,16 @@ from src.fast_optimizer import (
     FastFeasibilityOptimizer,
     FastOptimizationResult,
 )
+from src.network import (
+    HybridRailNetwork,
+    LinearMECNetwork,
+    TransferNetworkProtocol,
+)
 from src.reliability import FaultDomainReliabilityModel
+from src.rl_agent_action_space import (
+    CloudPolicy,
+    RetentionPolicy,
+)
 from src.topology import LinearRailTopology, TracksideSite
 from src.two_timescale_control import (
     FastTimescaleState,
@@ -20,7 +31,6 @@ from src.two_timescale_control import (
     StandbyMode,
     build_fast_decision_for_plan,
     legacy_mode_to_policy,
-    retention_policy_to_legacy_mode,
 )
 
 
@@ -30,14 +40,14 @@ def optimize_plan(
     topology: LinearRailTopology,
     state: FastTimescaleState,
     slow_decision: SlowTimescaleDecision,
+    network: TransferNetworkProtocol | None = None,
 ) -> FastOptimizationResult:
     """先审计原方案，再调用修复器，模拟真实执行顺序。"""
 
     initial_decision = build_fast_decision_for_plan(
         state=state,
-        standby_mode=retention_policy_to_legacy_mode(
-            slow_decision.retention_policy,
-            slow_decision.replica_count,
+        retention_policy=(
+            slow_decision.retention_policy
         ),
         backup_activation_triggered=False,
     )
@@ -66,12 +76,29 @@ def optimize_plan(
         ),
         cold_activated_pairs=cold_pairs,
     )
+    optimizer_arguments = {
+        "functions": auditor.functions,
+        "sfc": auditor.sfc,
+        "topology": topology,
+        "auditor": auditor,
+        "return_result_to_source": True,
+    }
+    if network is not None:
+        # 云修复场景显式传入具有物理含义的网络和成本参数。
+        optimizer_arguments.update(
+            {
+                "network": network,
+                "edge_cpu_cost_per_unit": 0.01,
+                "edge_memory_cost_per_mb_second": 0.001,
+                "cloud_cpu_cost_per_unit": 0.05,
+                "cloud_memory_cost_per_mb_second": 0.005,
+                "cold_start_cost_per_ms": 0.10,
+                "input_size_mb_per_request": 2.0,
+                "slot_seconds": 1.0,
+            }
+        )
     optimizer = FastFeasibilityOptimizer(
-        functions=auditor.functions,
-        sfc=auditor.sfc,
-        topology=topology,
-        auditor=auditor,
-        return_result_to_source=True,
+        **optimizer_arguments,
     )
     return optimizer.optimize(
         state=state,
@@ -190,6 +217,168 @@ def optimize_plan_for_test(
             slow_decision=slow_decision,
         ),
         node_fault_domains,
+    )
+
+
+def optimize_cloud_policy_case(
+    *,
+    cloud_policy: CloudPolicy,
+    replica_count: int,
+) -> tuple[FastOptimizationResult, int]:
+    """构造边缘节点均属同一故障域、只能由云恢复隔离的场景。"""
+
+    edge_count = replica_count
+    cloud_node_id = edge_count
+    edge_nodes = [
+        EdgeNode(
+            node_id=node_id,
+            name=f"MEC-{node_id + 1}",
+            node_type=NodeType.TRACKSIDE,
+            cpu_capacity=100.0,
+            memory_capacity_mb=2000.0,
+            reliability=0.99,
+            fault_domain=0,
+        )
+        for node_id in range(edge_count)
+    ]
+    cloud_node = EdgeNode(
+        node_id=cloud_node_id,
+        name="测试中心云",
+        node_type=NodeType.CLOUD,
+        cpu_capacity=1000.0,
+        memory_capacity_mb=64000.0,
+        reliability=0.999,
+        fault_domain=1,
+    )
+    topology = LinearRailTopology(
+        sites=[
+            TracksideSite(
+                node=node,
+                position_m=float(node.node_id * 1000),
+                coverage_radius_m=1200.0,
+            )
+            for node in edge_nodes
+        ],
+        cloud_node=cloud_node,
+    )
+    functions = [
+        ServerlessFunction(
+            function_id=function_id,
+            name=f"测试函数{function_id}",
+            memory_mb=100.0,
+            cpu_cycles_per_request=10.0,
+            image_size_mb=10.0,
+            warm_exec_time_ms=10.0,
+            cold_start_time_ms=100.0,
+            output_ratio=1.0,
+        )
+        for function_id in (0, 1)
+    ]
+    sfc = SFCType(
+        sfc_id=0,
+        name="云修复测试SFC",
+        function_ids=[0, 1],
+        deadline_ms=500.0,
+        reliability_target=0.90,
+        priority=ServicePriority.CRITICAL,
+    )
+    reliability_model = FaultDomainReliabilityModel(
+        topology=topology,
+        fault_domain_availability={0: 0.999, 1: 0.9999},
+        minimum_distinct_fault_domains=2,
+    )
+    auditor = SlotConstraintAuditor(
+        functions=functions,
+        sfc=sfc,
+        topology=topology,
+        reliability_model=reliability_model,
+    )
+    initial_nodes = tuple(range(replica_count))
+    state = FastTimescaleState(
+        time_slot=0,
+        serving_mec=0,
+        remaining_dwell_time_s=10.0,
+        request_count=1,
+        function_ids=(0, 1),
+        candidate_node_ids={
+            0: initial_nodes,
+            1: initial_nodes,
+        },
+        operational_node_ids=frozenset(
+            {*range(edge_count), cloud_node_id}
+        ),
+    )
+    slow_decision = SlowTimescaleDecision(
+        decision_slot=0,
+        valid_until_slot=9,
+        replica_count=replica_count,
+        retention_policy=(
+            RetentionPolicy.PRIMARY_WARM
+        ),
+        cloud_policy=cloud_policy,
+        reason="测试云权限",
+    )
+    edge_network = LinearMECNetwork(
+        node_ids=list(range(edge_count)),
+        adjacent_bandwidth_mbps=1000.0,
+        propagation_delay_per_hop_ms=1.0,
+        edge_data_cost_per_mb_hop=0.01,
+    )
+    network = HybridRailNetwork(
+        edge_network=edge_network,
+        cloud_node_id=cloud_node_id,
+        cloud_backhaul_bandwidth_mbps=100.0,
+        cloud_one_way_propagation_delay_ms=20.0,
+        cloud_data_cost_per_mb=0.20,
+    )
+
+    return (
+        optimize_plan(
+            auditor=auditor,
+            topology=topology,
+            state=state,
+            slow_decision=slow_decision,
+            network=network,
+        ),
+        cloud_node_id,
+    )
+
+
+def test_edge_only_repair_never_uses_operational_cloud() -> None:
+    """EDGE_ONLY即使看见正常云节点，也必须返回边缘内结果或失败。"""
+
+    result, cloud_node_id = optimize_cloud_policy_case(
+        cloud_policy=CloudPolicy.EDGE_ONLY,
+        replica_count=2,
+    )
+
+    assert result.succeeded is False
+    assert all(
+        cloud_node_id not in node_ids
+        for node_ids
+        in result.function_replica_node_ids.values()
+    )
+
+
+@pytest.mark.parametrize("replica_count", [2, 3])
+def test_cloud_allowed_repairs_with_exact_replica_count(
+    replica_count: int,
+) -> None:
+    """边缘无解时允许云兜底，但每个VNF仍保持慢层副本数。"""
+
+    result, cloud_node_id = optimize_cloud_policy_case(
+        cloud_policy=CloudPolicy.CLOUD_ALLOWED,
+        replica_count=replica_count,
+    )
+
+    assert result.succeeded is True
+    assert result.final_audit.all_constraints_met is True
+    assert all(
+        len(node_ids) == replica_count
+        and len(set(node_ids)) == replica_count
+        and cloud_node_id in node_ids
+        for node_ids
+        in result.function_replica_node_ids.values()
     )
 
 

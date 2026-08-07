@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
+import numpy as np
+
 from src.slow_timescale_rl_env import (
     SlowControlAction,
 )
@@ -21,6 +23,19 @@ class CloudPolicy(IntEnum):
 
     EDGE_ONLY = 0
     CLOUD_ALLOWED = 1
+
+
+@dataclass(frozen=True)
+class ActionFeasibilityContext:
+    """保存慢层动作掩码所需的当前基础设施摘要。"""
+
+    # 这里只保存仍可工作的轨旁节点；故障节点不能参与慢层预检查。
+    operational_edge_node_ids: frozenset[int]
+    operational_cloud_node_id: int | None
+    node_free_memory_mb: dict[int, float]
+    node_fault_domains: dict[int, int]
+    total_function_memory_mb: float
+    minimum_distinct_fault_domains: int
 
 
 @dataclass(frozen=True)
@@ -89,6 +104,75 @@ def decode_ddqn_action(
         retention_policy=retention,
         cloud_policy=cloud,
     )
+
+
+def build_valid_action_mask(
+    context: ActionFeasibilityContext,
+) -> np.ndarray:
+    """返回12个动作的必要条件掩码，True表示可继续精确检查。"""
+
+    mask = np.zeros(
+        get_ddqn_action_count(),
+        dtype=np.bool_,
+    )
+
+    for action_id in range(get_ddqn_action_count()):
+        action = decode_ddqn_action(action_id)
+        candidate_ids = set(
+            context.operational_edge_node_ids
+        )
+
+        # CLOUD_ALLOWED只是把中心云加入候选，不代表一定使用中心云。
+        if (
+            action.cloud_policy
+            is CloudPolicy.CLOUD_ALLOWED
+            and context.operational_cloud_node_id
+            is not None
+        ):
+            candidate_ids.add(
+                context.operational_cloud_node_id
+            )
+
+        enough_nodes = (
+            len(candidate_ids) >= action.replica_count
+        )
+        enough_domains = len(
+            {
+                context.node_fault_domains[node_id]
+                for node_id in candidate_ids
+            }
+        ) >= context.minimum_distinct_fault_domains
+
+        # 只有ALL_WARM要求全部计划副本常驻内存；另外两种策略
+        # 的实际冷启动与瞬时资源约束交给快层精确审计。
+        enough_hot_memory = True
+        if (
+            action.retention_policy
+            is RetentionPolicy.ALL_WARM
+        ):
+            required_memory_mb = (
+                action.replica_count
+                * context.total_function_memory_mb
+            )
+            available_memory_mb = sum(
+                context.node_free_memory_mb.get(
+                    node_id,
+                    0.0,
+                )
+                for node_id in candidate_ids
+            )
+            enough_hot_memory = (
+                available_memory_mb
+                >= required_memory_mb
+            )
+
+        mask[action_id] = (
+            enough_nodes
+            and enough_domains
+            and enough_hot_memory
+        )
+
+    return mask
 
 
 DDQN_ACTION_NAMES = tuple(

@@ -5,17 +5,19 @@ from itertools import permutations, product
 
 from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
+    NodeType,
     ServerlessFunction,
     SFCType,
     SlotConstraintAudit,
 )
+from src.network import TransferNetworkProtocol
+from src.rl_agent_action_space import CloudPolicy
 from src.topology import LinearRailTopology
 from src.two_timescale_control import (
     FastTimescaleDecision,
     FastTimescaleState,
     SlowTimescaleDecision,
     build_fast_decision_for_plan,
-    retention_policy_to_legacy_mode,
 )
 
 
@@ -50,23 +52,65 @@ class FastFeasibilityOptimizer:
         topology: LinearRailTopology,
         auditor: SlotConstraintAuditor,
         return_result_to_source: bool = True,
+        network: TransferNetworkProtocol | None = None,
+        edge_cpu_cost_per_unit: float = 0.0,
+        edge_memory_cost_per_mb_second: float = 0.0,
+        cloud_cpu_cost_per_unit: float = 0.0,
+        cloud_memory_cost_per_mb_second: float = 0.0,
+        cold_start_cost_per_ms: float = 0.0,
+        input_size_mb_per_request: float = 0.0,
+        slot_seconds: float = 1.0,
     ) -> None:
-        """保存搜索所需模型，并建立稳定的节点顺序和位置索引。"""
+        """保存搜索、传输和候选成本估计所需的模型。"""
+
+        nonnegative_values = (
+            edge_cpu_cost_per_unit,
+            edge_memory_cost_per_mb_second,
+            cloud_cpu_cost_per_unit,
+            cloud_memory_cost_per_mb_second,
+            cold_start_cost_per_ms,
+            input_size_mb_per_request,
+        )
+        if any(value < 0 for value in nonnegative_values):
+            raise ValueError("快层成本参数不能小于0。")
+        if slot_seconds <= 0:
+            raise ValueError("快时隙长度必须大于0。")
 
         self.functions = list(functions)
+        self.function_map = {
+            function.function_id: function
+            for function in self.functions
+        }
         self.sfc = sfc
         self.topology = topology
         self.auditor = auditor
         self.return_result_to_source = return_result_to_source
-        self.node_ids = tuple(
+        self.network = network
+        self.edge_cpu_cost_per_unit = edge_cpu_cost_per_unit
+        self.edge_memory_cost_per_mb_second = (
+            edge_memory_cost_per_mb_second
+        )
+        self.cloud_cpu_cost_per_unit = cloud_cpu_cost_per_unit
+        self.cloud_memory_cost_per_mb_second = (
+            cloud_memory_cost_per_mb_second
+        )
+        self.cold_start_cost_per_ms = cold_start_cost_per_ms
+        self.input_size_mb_per_request = input_size_mb_per_request
+        self.slot_seconds = slot_seconds
+        self.edge_node_ids = tuple(
             sorted(
                 site.node.node_id
                 for site in topology.sites
             )
         )
-        self.node_positions = {
-            site.node.node_id: site.position_m
-            for site in topology.sites
+        self.cloud_node_id = (
+            None
+            if topology.cloud_node is None
+            else topology.cloud_node.node_id
+        )
+        self.node_map = {
+            node.node_id: node
+            for node in topology.compute_nodes
         }
 
     def _cold_activated_pairs(
@@ -146,13 +190,11 @@ class FastFeasibilityOptimizer:
         candidate_map: dict[int, tuple[int, ...]],
         decision: FastTimescaleDecision,
     ) -> tuple[
-        int,
-        int,
-        int,
         float,
+        int,
         tuple[int, ...],
     ]:
-        """计算确定性字典序评分，元组越小越优。"""
+        """按预计总成本、修改函数数和节点编号进行稳定排序。"""
 
         initial_map = state.candidate_node_ids
         changed_function_count = sum(
@@ -160,46 +202,132 @@ class FastFeasibilityOptimizer:
             != initial_map[function_id]
             for function_id in state.function_ids
         )
-        replaced_replica_count = sum(
-            len(
-                set(initial_map[function_id])
-                - set(candidate_map[function_id])
-            )
-            for function_id in state.function_ids
-        )
-
-        # 路径从当前接入MEC出发，按SFC顺序访问执行节点；
-        # 若配置要求返回结果，再把返回接入MEC的距离计入评分。
-        path = [state.serving_mec]
-        path.extend(decision.selected_execution_node_ids)
-        if (
-            self.return_result_to_source
-            and decision.selected_execution_node_ids
-        ):
-            path.append(state.serving_mec)
-
-        distance = sum(
-            abs(
-                self.node_positions[left]
-                - self.node_positions[right]
-            )
-            for left, right in zip(path, path[1:])
-        )
         flattened_ids = tuple(
             node_id
             for function_id in state.function_ids
             for node_id in candidate_map[function_id]
         )
 
-        # 五级优先级依次为：修改函数数、副本替换数、冷启动数、
-        # 地理路径距离和节点编号。最后一项保证同分时结果仍稳定。
+        # 成本优先体现论文目标；后两项只在同成本时减少改动并
+        # 保证相同输入重复运行得到相同结果。
         return (
+            self._estimated_total_cost(
+                state=state,
+                decision=decision,
+            ),
             int(changed_function_count),
-            int(replaced_replica_count),
-            len(decision.cold_start_function_ids),
-            float(distance),
             flattened_ids,
         )
+
+    def _node_cost_rates(
+        self,
+        node_id: int,
+    ) -> tuple[float, float]:
+        """返回指定节点的CPU单价和内存单价。"""
+
+        node = self.node_map[node_id]
+        if node.node_type is NodeType.CLOUD:
+            return (
+                self.cloud_cpu_cost_per_unit,
+                self.cloud_memory_cost_per_mb_second,
+            )
+        return (
+            self.edge_cpu_cost_per_unit,
+            self.edge_memory_cost_per_mb_second,
+        )
+
+    def _estimated_total_cost(
+        self,
+        state: FastTimescaleState,
+        decision: FastTimescaleDecision,
+    ) -> float:
+        """估计候选方案的运行、传输和冷启动总成本。"""
+
+        selected_by_function = dict(
+            zip(
+                state.function_ids,
+                decision.selected_execution_node_ids,
+            )
+        )
+        active_pairs = {
+            (function_id, node_id)
+            for function_id, node_ids
+            in decision.function_hot_node_ids.items()
+            for node_id in node_ids
+        }
+
+        # 被选中但尚未保温的容器在本时隙冷启动后同样占用内存。
+        for function_id in decision.cold_start_function_ids:
+            if function_id in selected_by_function:
+                active_pairs.add(
+                    (
+                        function_id,
+                        selected_by_function[function_id],
+                    )
+                )
+
+        run_cost = 0.0
+        for function_id, node_id in active_pairs:
+            function = self.function_map[function_id]
+            _, memory_rate = self._node_cost_rates(
+                node_id
+            )
+            run_cost += (
+                function.memory_mb
+                * self.slot_seconds
+                * memory_rate
+            )
+
+        if decision.request_success is True:
+            for function_id, node_id in selected_by_function.items():
+                function = self.function_map[function_id]
+                cpu_rate, _ = self._node_cost_rates(node_id)
+                run_cost += (
+                    function.cpu_demand(state.request_count)
+                    * cpu_rate
+                )
+
+        route_cost = 0.0
+        if (
+            self.network is not None
+            and decision.request_success is True
+        ):
+            current_node_id = state.serving_mec
+            current_data_mb = (
+                self.input_size_mb_per_request
+                * state.request_count
+            )
+            for function_id, destination_node_id in (
+                selected_by_function.items()
+            ):
+                route_cost += self.network.transfer_cost(
+                    data_size_mb=current_data_mb,
+                    source_node_id=current_node_id,
+                    destination_node_id=(
+                        destination_node_id
+                    ),
+                )
+                current_node_id = destination_node_id
+                current_data_mb *= (
+                    self.function_map[function_id]
+                    .output_ratio
+                )
+
+            if self.return_result_to_source:
+                route_cost += self.network.transfer_cost(
+                    data_size_mb=current_data_mb,
+                    source_node_id=current_node_id,
+                    destination_node_id=state.serving_mec,
+                )
+
+        cold_start_cost = sum(
+            self.function_map[function_id]
+            .cold_start_time_ms
+            * self.cold_start_cost_per_ms
+            for function_id
+            in decision.cold_start_function_ids
+        )
+        return run_cost + route_cost + cold_start_cost
 
     def _preserve_initial_failure_failovers(
         self,
@@ -252,10 +380,25 @@ class FastFeasibilityOptimizer:
         initial_decision: FastTimescaleDecision,
         initial_audit: SlotConstraintAudit,
     ) -> FastOptimizationResult:
-        """在慢层副本数和主备模式不变的前提下修复部署。"""
+        """在慢层副本数、保留策略和云权限不变时修复部署。"""
 
         if slow_decision.replica_count <= 0:
             raise ValueError("慢层副本数量必须大于0。")
+
+        allowed_node_ids = set(self.edge_node_ids)
+        if (
+            slow_decision.cloud_policy
+            is CloudPolicy.CLOUD_ALLOWED
+            and self.cloud_node_id is not None
+        ):
+            allowed_node_ids.add(self.cloud_node_id)
+        initial_plan_policy_compliant = all(
+            node_id in allowed_node_ids
+            for function_id in state.function_ids
+            for node_id in state.candidate_node_ids[
+                function_id
+            ]
+        )
 
         # 静态约束满足还不够：活动请求还必须拥有完整可运行路径。
         execution_ready = (
@@ -276,6 +419,7 @@ class FastFeasibilityOptimizer:
             initial_audit.all_constraints_met
             and execution_ready
             and initial_plan_operational
+            and initial_plan_policy_compliant
         ):
             return FastOptimizationResult(
                 attempted=False,
@@ -310,21 +454,31 @@ class FastFeasibilityOptimizer:
                 evaluated_candidate_count=0,
             )
 
-        # 搜索空间只包含拓扑中存在且本时隙正常运行的轨旁MEC。
-        operational_ids = tuple(
-            sorted(
-                node_id
-                for node_id in state.operational_node_ids
-                if node_id in self.node_ids
-            )
+        # 云策略是慢层硬边界。EDGE_ONLY时即使云节点正常，
+        # 快层也不能把它加入搜索空间。
+        operational_edge_ids = tuple(
+            node_id
+            for node_id in self.edge_node_ids
+            if node_id in state.operational_node_ids
         )
+        operational_ids = operational_edge_ids
+        if (
+            self.cloud_node_id in allowed_node_ids
+            and self.cloud_node_id
+            in state.operational_node_ids
+        ):
+            operational_ids = (
+                *operational_ids,
+                self.cloud_node_id,
+            )
+
         if len(operational_ids) < required_count:
             return self._failure_result(
                 state=state,
                 initial_decision=initial_decision,
                 initial_audit=initial_audit,
                 reason=(
-                    f"当前只有{len(operational_ids)}个正常MEC，"
+                    f"当前只有{len(operational_ids)}个正常MEC/云候选节点，"
                     f"少于慢层要求的{required_count}个副本。"
                 ),
                 evaluated_candidate_count=0,
@@ -341,10 +495,8 @@ class FastFeasibilityOptimizer:
         ranked_candidates: list[
             tuple[
                 tuple[
-                    int,
-                    int,
-                    int,
                     float,
+                    int,
                     tuple[int, ...],
                 ],
                 dict[int, tuple[int, ...]],
@@ -374,11 +526,8 @@ class FastFeasibilityOptimizer:
             )
             decision = build_fast_decision_for_plan(
                 state=repaired_state,
-                # 快层保留策略的完整实现将在下一步完成；
-                # 当前先通过显式转换兼容原有无副作用路由函数。
-                standby_mode=retention_policy_to_legacy_mode(
-                    slow_decision.retention_policy,
-                    slow_decision.replica_count,
+                retention_policy=(
+                    slow_decision.retention_policy
                 ),
                 backup_activation_triggered=(
                     initial_decision

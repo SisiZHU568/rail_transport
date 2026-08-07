@@ -1,15 +1,61 @@
 """测试 DDQN 结构化慢层动作的编码、解码与边界检查。"""
 
+import numpy as np
 import pytest
 
 from src.rl_agent_action_space import (
+    ActionFeasibilityContext,
     CloudPolicy,
     DDQN_ACTION_NAMES,
     RetentionPolicy,
+    build_valid_action_mask,
     decode_ddqn_action,
     encode_ddqn_action,
     get_ddqn_action_count,
 )
+
+
+def test_action_mask_uses_cloud_to_restore_domain_diversity() -> None:
+    """仅边缘故障域不足时，允许云的同类动作仍可合法。"""
+
+    context = ActionFeasibilityContext(
+        operational_edge_node_ids=frozenset({0, 1}),
+        operational_cloud_node_id=5,
+        node_free_memory_mb={
+            0: 4000.0,
+            1: 4000.0,
+            5: 64000.0,
+        },
+        node_fault_domains={0: 0, 1: 0, 5: 3},
+        total_function_memory_mb=1536.0,
+        minimum_distinct_fault_domains=2,
+    )
+
+    mask = build_valid_action_mask(context)
+
+    assert mask.shape == (12,)
+    assert mask.dtype == np.bool_
+    assert not bool(mask[0])
+    assert bool(mask[1])
+
+
+def test_action_mask_rejects_impossible_all_warm_memory() -> None:
+    """全副本保温的内存下界超限时，只屏蔽对应保温动作。"""
+
+    context = ActionFeasibilityContext(
+        operational_edge_node_ids=frozenset({0, 1}),
+        operational_cloud_node_id=None,
+        node_free_memory_mb={0: 100.0, 1: 100.0},
+        node_fault_domains={0: 0, 1: 1},
+        total_function_memory_mb=150.0,
+        minimum_distinct_fault_domains=2,
+    )
+
+    mask = build_valid_action_mask(context)
+
+    assert bool(mask[0])
+    assert not bool(mask[4])
+    assert not bool(mask[6])
 
 
 @pytest.mark.parametrize(
