@@ -13,6 +13,10 @@ test_two_timescale_control.py
 
 import pytest
 
+from src.rl_agent_action_space import (
+    CloudPolicy,
+    RetentionPolicy,
+)
 from src.two_timescale_control import (
     FastTimescaleState,
     RuleBasedTwoTimescaleController,
@@ -20,7 +24,41 @@ from src.two_timescale_control import (
     SlowTimescaleState,
     StandbyMode,
     build_fast_decision_for_plan,
+    legacy_mode_to_policy,
 )
+
+
+def test_slow_decision_exposes_structured_policy() -> None:
+    """慢层决策直接保存副本数、保留策略和云权限。"""
+
+    decision = SlowTimescaleDecision(
+        decision_slot=0,
+        valid_until_slot=9,
+        replica_count=3,
+        retention_policy=(
+            RetentionPolicy.PRIMARY_WARM
+        ),
+        cloud_policy=CloudPolicy.CLOUD_ALLOWED,
+        reason="测试",
+    )
+
+    assert decision.use_redundancy is True
+    assert decision.replica_count == 3
+
+
+def test_legacy_modes_have_explicit_mapping() -> None:
+    """旧实验模式必须通过显式规则迁移，不能依赖隐含猜测。"""
+
+    assert legacy_mode_to_policy(StandbyMode.COLD) == (
+        2,
+        RetentionPolicy.PRIMARY_WARM,
+        CloudPolicy.EDGE_ONLY,
+    )
+    assert legacy_mode_to_policy(StandbyMode.DYNAMIC) == (
+        2,
+        RetentionPolicy.PRIMARY_WARM,
+        CloudPolicy.EDGE_ONLY,
+    )
 
 
 def build_controller() -> (
@@ -98,20 +136,18 @@ def build_slow_decision(
     直接构造快时间尺度测试使用的慢动作。
     """
 
-    use_redundancy = (
-        standby_mode is not StandbyMode.SINGLE
-    )
+    (
+        replica_count,
+        retention_policy,
+        cloud_policy,
+    ) = legacy_mode_to_policy(standby_mode)
 
     return SlowTimescaleDecision(
         decision_slot=0,
         valid_until_slot=9,
-        use_redundancy=use_redundancy,
-        replica_count=(
-            1
-            if standby_mode is StandbyMode.SINGLE
-            else 2
-        ),
-        standby_mode=standby_mode,
+        replica_count=replica_count,
+        retention_policy=retention_policy,
+        cloud_policy=cloud_policy,
         reason="测试动作",
     )
 
@@ -174,7 +210,11 @@ def test_low_target_and_low_risk_choose_single_replica() -> None:
 
     assert decision.use_redundancy is False
     assert decision.replica_count == 1
-    assert decision.standby_mode is StandbyMode.SINGLE
+    assert (
+        decision.retention_policy
+        is RetentionPolicy.PRIMARY_WARM
+    )
+    assert decision.cloud_policy is CloudPolicy.EDGE_ONLY
 
 
 def test_high_reliability_target_chooses_cold_redundancy() -> None:
@@ -195,7 +235,10 @@ def test_high_reliability_target_chooses_cold_redundancy() -> None:
 
     assert decision.use_redundancy is True
     assert decision.replica_count == 2
-    assert decision.standby_mode is StandbyMode.COLD
+    assert (
+        decision.retention_policy
+        is RetentionPolicy.PRIMARY_WARM
+    )
 
 
 def test_high_failure_risk_chooses_hot_standby() -> None:
@@ -213,7 +256,10 @@ def test_high_failure_risk_chooses_hot_standby() -> None:
         )
     )
 
-    assert decision.standby_mode is StandbyMode.HOT
+    assert (
+        decision.retention_policy
+        is RetentionPolicy.ALL_WARM
+    )
 
 
 def test_slow_decision_is_cached_inside_period() -> None:
@@ -242,8 +288,8 @@ def test_slow_decision_is_cached_inside_period() -> None:
 
     assert second_decision is first_decision
     assert (
-        second_decision.standby_mode
-        is StandbyMode.COLD
+        second_decision.retention_policy
+        is RetentionPolicy.PRIMARY_WARM
     )
 
 
@@ -276,8 +322,8 @@ def test_handover_forces_new_slow_decision() -> None:
     assert second_decision is not first_decision
     assert second_decision.decision_slot == 5
     assert (
-        second_decision.standby_mode
-        is StandbyMode.HOT
+        second_decision.retention_policy
+        is RetentionPolicy.ALL_WARM
     )
 
 

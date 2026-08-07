@@ -5,9 +5,9 @@ two_timescale_control.py
 
 慢时间尺度负责：
 
-1. 是否启用跨故障域冗余；
-2. 每个函数使用一个副本还是两个副本；
-3. 备用副本采用冷备还是全热备；
+1. 决定每个函数的副本数量；
+2. 选择实例按需、主实例保温或全部保温；
+3. 决定是否允许使用中心云；
 4. 决策在多个快时隙内保持有效。
 
 快时间尺度负责：
@@ -26,6 +26,10 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from src.rl_agent_action_space import (
+    CloudPolicy,
+    RetentionPolicy,
+)
 from src.topology import LinearRailTopology
 
 
@@ -42,6 +46,55 @@ class StandbyMode(Enum):
 
     # 主实例和备用实例都保持温热
     HOT = "hot"
+
+    # 冷备基础上，允许快层在切换窗口临时激活备用
+    DYNAMIC = "dynamic"
+
+
+def legacy_mode_to_policy(
+    standby_mode: StandbyMode,
+) -> tuple[int, RetentionPolicy, CloudPolicy]:
+    """把旧实验模式显式转换为新的结构化慢层策略。"""
+
+    # 旧基线没有中心云开关，因此统一映射为仅边缘部署。
+    mapping = {
+        StandbyMode.SINGLE: (
+            1,
+            RetentionPolicy.PRIMARY_WARM,
+            CloudPolicy.EDGE_ONLY,
+        ),
+        StandbyMode.COLD: (
+            2,
+            RetentionPolicy.PRIMARY_WARM,
+            CloudPolicy.EDGE_ONLY,
+        ),
+        StandbyMode.HOT: (
+            2,
+            RetentionPolicy.ALL_WARM,
+            CloudPolicy.EDGE_ONLY,
+        ),
+        StandbyMode.DYNAMIC: (
+            2,
+            RetentionPolicy.PRIMARY_WARM,
+            CloudPolicy.EDGE_ONLY,
+        ),
+    }
+    return mapping[StandbyMode(standby_mode)]
+
+
+def retention_policy_to_legacy_mode(
+    retention_policy: RetentionPolicy,
+    replica_count: int,
+) -> StandbyMode:
+    """临时把新保留策略转换为旧快层接口可识别的模式。"""
+
+    # 下一开发步骤会让快层直接理解 RetentionPolicy；在此之前，
+    # 该转换只负责保证旧仿真与新慢层决策能够平稳衔接。
+    if replica_count == 1:
+        return StandbyMode.SINGLE
+    if retention_policy is RetentionPolicy.ALL_WARM:
+        return StandbyMode.HOT
+    return StandbyMode.COLD
 
 
 @dataclass(frozen=True)
@@ -118,14 +171,14 @@ class SlowTimescaleDecision:
     valid_until_slot:
         该决策正常情况下持续有效到哪个时隙。
 
-    use_redundancy:
-        是否使用跨故障域冗余副本。
-
     replica_count:
         每个函数的副本数量。
 
-    standby_mode:
-        基础主备模式。
+    retention_policy:
+        Serverless实例保留策略。
+
+    cloud_policy:
+        是否允许快层使用中心云节点。
 
     reason:
         生成该决策的原因，便于调试和论文分析。
@@ -134,11 +187,17 @@ class SlowTimescaleDecision:
     decision_slot: int
     valid_until_slot: int
 
-    use_redundancy: bool
     replica_count: int
-    standby_mode: StandbyMode
+    retention_policy: RetentionPolicy
+    cloud_policy: CloudPolicy
 
     reason: str
+
+    @property
+    def use_redundancy(self) -> bool:
+        """副本数大于1时，说明慢层启用了冗余。"""
+
+        return self.replica_count > 1
 
 
 @dataclass(frozen=True)
@@ -566,8 +625,10 @@ class RuleBasedTwoTimescaleController:
         )
 
         if not use_redundancy:
-            standby_mode = StandbyMode.SINGLE
             replica_count = 1
+            retention_policy = (
+                RetentionPolicy.PRIMARY_WARM
+            )
 
             reason = (
                 "可靠性目标和预测故障风险均较低，"
@@ -589,7 +650,9 @@ class RuleBasedTwoTimescaleController:
             )
 
             if high_failure_risk:
-                standby_mode = StandbyMode.HOT
+                retention_policy = (
+                    RetentionPolicy.ALL_WARM
+                )
 
                 reason = (
                     "预测故障风险较高，"
@@ -597,7 +660,9 @@ class RuleBasedTwoTimescaleController:
                 )
 
             elif high_request_load:
-                standby_mode = StandbyMode.HOT
+                retention_policy = (
+                    RetentionPolicy.ALL_WARM
+                )
 
                 reason = (
                     "预测请求负载较高，"
@@ -605,7 +670,9 @@ class RuleBasedTwoTimescaleController:
                 )
 
             else:
-                standby_mode = StandbyMode.COLD
+                retention_policy = (
+                    RetentionPolicy.PRIMARY_WARM
+                )
 
                 reason = (
                     "可靠性要求需要双副本，"
@@ -620,9 +687,10 @@ class RuleBasedTwoTimescaleController:
                 + self.slow_period_slots
                 - 1
             ),
-            use_redundancy=use_redundancy,
             replica_count=replica_count,
-            standby_mode=standby_mode,
+            retention_policy=retention_policy,
+            # 当前规则基线仍只在边缘侧规划副本。
+            cloud_policy=CloudPolicy.EDGE_ONLY,
             reason=reason,
         )
 
@@ -644,15 +712,18 @@ class RuleBasedTwoTimescaleController:
         )
 
         backup_activation_triggered = (
-            slow_decision.standby_mode
-            is StandbyMode.COLD
+            slow_decision.retention_policy
+            is RetentionPolicy.PRIMARY_WARM
             and near_handover
             and slow_decision.use_redundancy
         )
 
         return build_fast_decision_for_plan(
             state=state,
-            standby_mode=slow_decision.standby_mode,
+            standby_mode=retention_policy_to_legacy_mode(
+                slow_decision.retention_policy,
+                slow_decision.replica_count,
+            ),
             backup_activation_triggered=(
                 backup_activation_triggered
             ),
@@ -779,13 +850,12 @@ class FixedModeTwoTimescaleController:
         if self._decision is not None:
             return self._decision
 
-        use_redundancy = (
+        (
+            replica_count,
+            retention_policy,
+            cloud_policy,
+        ) = legacy_mode_to_policy(
             self.standby_mode
-            is not StandbyMode.SINGLE
-        )
-
-        replica_count = (
-            2 if use_redundancy else 1
         )
 
         if self.standby_mode is StandbyMode.SINGLE:
@@ -794,7 +864,10 @@ class FixedModeTwoTimescaleController:
         elif self.standby_mode is StandbyMode.HOT:
             reason = "固定跨故障域全热备基线。"
 
-        elif self.enable_handover_activation:
+        elif (
+            self.enable_handover_activation
+            or self.standby_mode is StandbyMode.DYNAMIC
+        ):
             reason = (
                 "固定跨故障域冷备，"
                 "切换窗口内动态激活备用。"
@@ -806,9 +879,9 @@ class FixedModeTwoTimescaleController:
         self._decision = SlowTimescaleDecision(
             decision_slot=state.time_slot,
             valid_until_slot=10**12,
-            use_redundancy=use_redundancy,
             replica_count=replica_count,
-            standby_mode=self.standby_mode,
+            retention_policy=retention_policy,
+            cloud_policy=cloud_policy,
             reason=reason,
         )
 
@@ -829,14 +902,21 @@ class FixedModeTwoTimescaleController:
         )
 
         backup_activation_triggered = (
-            self.standby_mode is StandbyMode.COLD
-            and self.enable_handover_activation
+            self.standby_mode
+            in (StandbyMode.COLD, StandbyMode.DYNAMIC)
+            and (
+                self.enable_handover_activation
+                or self.standby_mode is StandbyMode.DYNAMIC
+            )
             and near_handover
         )
 
         return build_fast_decision_for_plan(
             state=state,
-            standby_mode=self.standby_mode,
+            standby_mode=retention_policy_to_legacy_mode(
+                slow_decision.retention_policy,
+                slow_decision.replica_count,
+            ),
             backup_activation_triggered=(
                 backup_activation_triggered
             ),

@@ -15,6 +15,7 @@ from src.two_timescale_control import (
     FastTimescaleState,
     SlowTimescaleDecision,
     build_fast_decision_for_plan,
+    retention_policy_to_legacy_mode,
 )
 
 
@@ -373,7 +374,12 @@ class FastFeasibilityOptimizer:
             )
             decision = build_fast_decision_for_plan(
                 state=repaired_state,
-                standby_mode=slow_decision.standby_mode,
+                # 快层保留策略的完整实现将在下一步完成；
+                # 当前先通过显式转换兼容原有无副作用路由函数。
+                standby_mode=retention_policy_to_legacy_mode(
+                    slow_decision.retention_policy,
+                    slow_decision.replica_count,
+                ),
                 backup_activation_triggered=(
                     initial_decision
                     .backup_activation_triggered

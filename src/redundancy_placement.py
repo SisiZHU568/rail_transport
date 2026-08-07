@@ -26,6 +26,7 @@ MEC-3：故障域1，选择为备用节点。
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 from src.entities import SFCType, TrainState
 from src.topology import LinearRailTopology
@@ -244,21 +245,30 @@ class ReliabilityAwareReplicaPlanner:
 
 
 def build_reliability_aware_replica_planner(
-    config: dict,
+    config: dict[str, Any],
+    replica_count: int | None = None,
 ) -> ReliabilityAwareReplicaPlanner:
     """
     根据配置文件创建主备副本规划器。
+
+    ``replica_count`` 用于接收慢层本周期选出的副本数；
+    未传入时继续使用配置文件中的默认值，兼容已有实验脚本。
     """
 
     reliability_config = config["reliability"]
+    selected_replica_count = (
+        int(reliability_config["replica_count"])
+        if replica_count is None
+        else int(replica_count)
+    )
 
     return ReliabilityAwareReplicaPlanner(
-        replica_count=(
-            reliability_config["replica_count"]
-        ),
+        replica_count=selected_replica_count,
         minimum_distinct_fault_domains=(
-            reliability_config[
-                "minimum_distinct_fault_domains"
-            ]
+            int(
+                reliability_config[
+                    "minimum_distinct_fault_domains"
+                ]
+            )
         ),
     )

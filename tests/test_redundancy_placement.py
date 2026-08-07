@@ -176,3 +176,30 @@ def test_impossible_fault_domain_diversity_is_rejected() -> None:
             ),
             topology=same_domain_topology,
         )
+
+
+def test_builder_can_override_replica_count_to_three() -> None:
+    """慢层选择三副本时，每个 VNF 都必须得到三个不同节点。"""
+
+    config = load_config("configs/debug.yaml")
+    topology = build_linear_topology(config)
+    planner = build_reliability_aware_replica_planner(
+        config,
+        replica_count=3,
+    )
+
+    plan = planner.plan(
+        sfc=build_test_sfc(),
+        train_state=build_train_state(
+            serving_mec=0,
+            next_mec=1,
+        ),
+        topology=topology,
+    )
+
+    assert all(
+        len(node_ids) == 3
+        and len(set(node_ids)) == 3
+        for node_ids
+        in plan.function_replica_node_ids.values()
+    )

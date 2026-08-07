@@ -19,6 +19,8 @@ from src.two_timescale_control import (
     SlowTimescaleDecision,
     StandbyMode,
     build_fast_decision_for_plan,
+    legacy_mode_to_policy,
+    retention_policy_to_legacy_mode,
 )
 
 
@@ -33,7 +35,10 @@ def optimize_plan(
 
     initial_decision = build_fast_decision_for_plan(
         state=state,
-        standby_mode=slow_decision.standby_mode,
+        standby_mode=retention_policy_to_legacy_mode(
+            slow_decision.retention_policy,
+            slow_decision.replica_count,
+        ),
         backup_activation_triggered=False,
     )
     cold_pairs = {
@@ -164,12 +169,17 @@ def optimize_plan_for_test(
             else operational_node_ids
         ),
     )
+    (
+        _,
+        retention_policy,
+        cloud_policy,
+    ) = legacy_mode_to_policy(standby_mode)
     slow_decision = SlowTimescaleDecision(
         decision_slot=0,
         valid_until_slot=9,
-        use_redundancy=replica_count > 1,
         replica_count=replica_count,
-        standby_mode=standby_mode,
+        retention_policy=retention_policy,
+        cloud_policy=cloud_policy,
         reason="测试慢动作",
     )
     return (

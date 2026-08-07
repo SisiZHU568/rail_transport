@@ -12,9 +12,9 @@ two_timescale_simulator.py
 
 慢时间尺度输出：
 
-1. 是否启用跨故障域冗余；
-2. 副本数量；
-3. 单副本、冷备或热备模式。
+1. 每个函数的副本数量；
+2. Serverless实例保留策略；
+3. 中心云使用策略。
 
 快时间尺度输入：
 
@@ -72,7 +72,7 @@ from src.two_timescale_control import (
     FastTimescaleState,
     SlowTimescaleDecision,
     SlowTimescaleState,
-    StandbyMode,
+    retention_policy_to_legacy_mode,
 )
 from src.workload import DeterministicWorkload
 
@@ -616,7 +616,10 @@ class TwoTimescaleRuntimeSimulator:
         previous_serving_mec: int | None = None
 
         previous_slow_decision_slot: int | None = None
-        previous_slow_mode: StandbyMode | None = None
+        # 使用结构化三元组判断慢策略是否改变，避免继续依赖旧枚举。
+        previous_slow_policy: (
+            tuple[object, ...] | None
+        ) = None
 
         previous_candidate_map: (
             dict[int, tuple[int, ...]] | None
@@ -674,10 +677,16 @@ class TwoTimescaleRuntimeSimulator:
                 != previous_slow_decision_slot
             )
 
+            current_slow_policy = (
+                slow_decision.replica_count,
+                slow_decision.retention_policy,
+                slow_decision.cloud_policy,
+            )
+
             slow_mode_changed = (
-                previous_slow_mode is not None
-                and slow_decision.standby_mode
-                is not previous_slow_mode
+                previous_slow_policy is not None
+                and current_slow_policy
+                != previous_slow_policy
             )
 
             candidate_map = (
@@ -907,9 +916,11 @@ class TwoTimescaleRuntimeSimulator:
                         slow_mode_changed
                     ),
                     slow_mode=(
-                        slow_decision
-                        .standby_mode
-                        .value
+                        # 暂时保留旧结果列名与取值，便于历史实验对比。
+                        retention_policy_to_legacy_mode(
+                            slow_decision.retention_policy,
+                            slow_decision.replica_count,
+                        ).value
                     ),
                     use_redundancy=(
                         slow_decision.use_redundancy
@@ -1001,9 +1012,7 @@ class TwoTimescaleRuntimeSimulator:
                 slow_decision.decision_slot
             )
 
-            previous_slow_mode = (
-                slow_decision.standby_mode
-            )
+            previous_slow_policy = current_slow_policy
 
             previous_candidate_map = dict(
                 candidate_map
