@@ -55,13 +55,13 @@ def test_high_risk_multiplier_can_force_failure() -> None:
     topology = build_test_topology()
 
     domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
     node_ids = {
-        site.node.node_id
-        for site in topology.sites
+        node.node_id
+        for node in topology.compute_nodes
     }
 
     process = WindowedMarkovFailureProcess(
@@ -112,13 +112,13 @@ def test_reset_reproduces_same_sequence() -> None:
     topology = build_test_topology()
 
     domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
     node_ids = {
-        site.node.node_id
-        for site in topology.sites
+        node.node_id
+        for node in topology.compute_nodes
     }
 
     process = WindowedMarkovFailureProcess(
@@ -186,3 +186,35 @@ def test_builder_accepts_seed_override() -> None:
     )
 
     assert process.random_seed == 9876
+
+
+def test_failure_state_contains_every_compute_node() -> None:
+    """高风险随机故障状态必须同时描述轨旁 MEC 和中心云。"""
+
+    config = load_config("configs/debug.yaml")
+    topology = build_linear_topology(config)
+    process = build_windowed_markov_failure_process(
+        config=config,
+        topology=topology,
+        random_seed=123,
+    )
+
+    process.reset()
+    state = process.state_for_slot(0)
+
+    assert set(state.node_local_up) == {
+        node.node_id
+        for node in topology.compute_nodes
+    }
+    assert set(state.domain_up) == {
+        node.fault_domain
+        for node in topology.compute_nodes
+    }
+    assert topology.cloud_node is not None
+    assert isinstance(
+        state.is_node_operational(
+            topology.cloud_node.node_id,
+            topology,
+        ),
+        bool,
+    )

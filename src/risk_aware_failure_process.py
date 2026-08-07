@@ -132,16 +132,16 @@ class WindowedMarkovFailureProcess(
         self.domain_ids = tuple(
             sorted(
                 {
-                    site.node.fault_domain
-                    for site in topology.sites
+                    node.fault_domain
+                    for node in topology.compute_nodes
                 }
             )
         )
 
         self.node_ids = tuple(
             sorted(
-                site.node.node_id
-                for site in topology.sites
+                node.node_id
+                for node in topology.compute_nodes
             )
         )
 
@@ -495,23 +495,23 @@ def build_windowed_markov_failure_process(
     }
 
     topology_domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
-    missing_trackside_domain_ids = (
+    missing_domain_ids = (
         topology_domain_ids
         - set(fault_domain_availability)
     )
 
-    if missing_trackside_domain_ids:
+    if missing_domain_ids:
         raise ValueError(
-            "以下轨旁故障域缺少可靠性配置："
-            f"{sorted(missing_trackside_domain_ids)}。"
+            "以下计算节点故障域缺少可靠性配置："
+            f"{sorted(missing_domain_ids)}。"
         )
 
-    # Task 6 接入云故障状态前，当前过程仍只管理轨旁站点。
-    # 配置可以提前包含云故障域，但这里只向旧构造器传入轨旁域。
+    # 只读取当前计算拓扑实际使用的故障域。
+    # 因此关闭中心云时，配置文件可以继续保留云故障域参数。
     domain_failure_probabilities = {
         domain_id: (
             _failure_probability_from_availability(
@@ -534,22 +534,22 @@ def build_windowed_markov_failure_process(
     }
 
     node_failure_probabilities = {
-        site.node.node_id: (
+        node.node_id: (
             _failure_probability_from_availability(
                 availability=(
-                    site.node.reliability
+                    node.reliability
                 ),
                 recovery_probability=(
                     node_recovery_probability
                 ),
             )
         )
-        for site in topology.sites
+        for node in topology.compute_nodes
     }
 
     node_recovery_probabilities = {
-        site.node.node_id: node_recovery_probability
-        for site in topology.sites
+        node.node_id: node_recovery_probability
+        for node in topology.compute_nodes
     }
 
     multiplier = float(

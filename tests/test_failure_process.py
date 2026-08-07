@@ -8,6 +8,7 @@ from src.config import load_config
 from src.failure_process import (
     MarkovFailureProcess,
     ScriptedFailureProcess,
+    build_markov_failure_process,
 )
 from src.topology import build_linear_topology
 
@@ -95,13 +96,13 @@ def test_markov_failure_and_recovery() -> None:
     topology = build_test_topology()
 
     domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
     node_ids = {
-        site.node.node_id
-        for site in topology.sites
+        node.node_id
+        for node in topology.compute_nodes
     }
 
     process = MarkovFailureProcess(
@@ -150,13 +151,13 @@ def test_markov_reset_reproduces_same_sequence() -> None:
     topology = build_test_topology()
 
     domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
     node_ids = {
-        site.node.node_id
-        for site in topology.sites
+        node.node_id
+        for node in topology.compute_nodes
     }
 
     process = MarkovFailureProcess(
@@ -193,3 +194,49 @@ def test_markov_reset_reproduces_same_sequence() -> None:
     ]
 
     assert first_sequence == second_sequence
+
+
+def test_markov_builder_state_contains_every_compute_node() -> None:
+    """配置构建的随机故障状态必须包含轨旁 MEC 和中心云。"""
+
+    config = load_config("configs/debug.yaml")
+    topology = build_linear_topology(config)
+    process = build_markov_failure_process(
+        config=config,
+        topology=topology,
+        random_seed=123,
+    )
+
+    process.reset()
+    state = process.state_for_slot(0)
+
+    assert set(state.node_local_up) == {
+        node.node_id
+        for node in topology.compute_nodes
+    }
+    assert set(state.domain_up) == {
+        node.fault_domain
+        for node in topology.compute_nodes
+    }
+
+
+def test_scripted_failure_process_can_fail_cloud_node() -> None:
+    """测试场景可以显式注入云节点故障，便于验证故障切换。"""
+
+    topology = build_test_topology()
+    cloud_node = topology.cloud_node
+    assert cloud_node is not None
+
+    process = ScriptedFailureProcess(
+        topology=topology,
+        down_nodes_by_slot={
+            1: {cloud_node.node_id},
+        },
+    )
+
+    state = process.state_for_slot(1)
+
+    assert state.is_node_operational(
+        node_id=cloud_node.node_id,
+        topology=topology,
+    ) is False

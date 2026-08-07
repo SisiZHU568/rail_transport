@@ -2,15 +2,15 @@
 """
 failure_process.py
 
-本文件负责生成轨旁基础设施在每个离散时隙中的运行状态。
+本文件负责生成轨旁 MEC 与中心云在每个离散时隙中的运行状态。
 
 当前考虑两层故障：
 
 1. 故障域故障
    可能同时使同一故障域中的多个 MEC 不可用。
 
-2. MEC 节点局部故障
-   即使所属故障域正常，单个 MEC 仍可能失效。
+2. 计算节点局部故障
+   即使所属故障域正常，单个轨旁 MEC 或中心云仍可能失效。
 
 节点最终可用需要同时满足：
 
@@ -43,13 +43,16 @@ class InfrastructureState:
 
     time_slot: int
 
-    # 故障域是否正常
+    # 故障域是否正常。
+    # 对轨旁 MEC，它表示区域供电、汇聚网络等共享条件；
+    # 对中心云，它表示云数据中心或云回传通道等共享条件。
     domain_up: dict[int, bool]
 
     # 节点自身是否正常
     #
-    # 注意，这里只是节点局部状态，
-    # 还没有结合所属故障域状态。
+    # 对中心云，它表示云计算服务自身状态，与上面的共享
+    # 故障域状态含义不同，因此两层状态不是重复记录。
+    # 注意，这里还没有结合所属故障域状态。
     node_local_up: dict[int, bool]
 
     def is_node_operational(
@@ -58,12 +61,13 @@ class InfrastructureState:
         topology: LinearRailTopology,
     ) -> bool:
         """
-        判断某个 MEC 节点最终是否可以工作。
+        判断某个计算节点最终是否可以工作。
         """
 
-        site = topology.get_site(node_id)
-
-        domain_id = site.node.fault_domain
+        # 中心云没有轨道位置，不能通过 get_site 查询；
+        # get_node 同时支持轨旁 MEC 和中心云。
+        node = topology.get_node(node_id)
+        domain_id = node.fault_domain
 
         if domain_id not in self.domain_up:
             raise KeyError(
@@ -171,14 +175,16 @@ class ScriptedFailureProcess(FailureProcess):
 
         self.topology = topology
 
+        # 故障状态覆盖全部可部署节点。未在脚本中列出的中心云
+        # 默认保持正常，因此旧的轨旁故障脚本无需增加云配置。
         self.domain_ids = {
-            site.node.fault_domain
-            for site in topology.sites
+            node.fault_domain
+            for node in topology.compute_nodes
         }
 
         self.node_ids = {
-            site.node.node_id
-            for site in topology.sites
+            node.node_id
+            for node in topology.compute_nodes
         }
 
         self.down_domains_by_slot = {
@@ -237,7 +243,7 @@ class ScriptedFailureProcess(FailureProcess):
 
         if unknown_node_ids:
             raise ValueError(
-                "存在未知 MEC 节点："
+                "存在未知计算节点："
                 f"{sorted(unknown_node_ids)}"
             )
 
@@ -338,16 +344,16 @@ class MarkovFailureProcess(FailureProcess):
         self.domain_ids = tuple(
             sorted(
                 {
-                    site.node.fault_domain
-                    for site in topology.sites
+                    node.fault_domain
+                    for node in topology.compute_nodes
                 }
             )
         )
 
         self.node_ids = tuple(
             sorted(
-                site.node.node_id
-                for site in topology.sites
+                node.node_id
+                for node in topology.compute_nodes
             )
         )
 
@@ -627,29 +633,35 @@ def build_markov_failure_process(
     }
 
     topology_domain_ids = {
-        site.node.fault_domain
-        for site in topology.sites
+        node.fault_domain
+        for node in topology.compute_nodes
     }
 
-    if set(fault_domain_availability) != (
+    missing_domain_ids = (
         topology_domain_ids
-    ):
+        - set(fault_domain_availability)
+    )
+
+    if missing_domain_ids:
         raise ValueError(
-            "运行态故障模型中的故障域配置"
-            "与铁路拓扑不一致。"
+            "以下计算节点故障域缺少可靠性配置："
+            f"{sorted(missing_domain_ids)}。"
         )
 
     domain_failure_probabilities = {
         domain_id: (
             _failure_probability_from_availability(
-                availability=availability,
+                availability=(
+                    fault_domain_availability[
+                        domain_id
+                    ]
+                ),
                 recovery_probability=(
                     domain_recovery_probability
                 ),
             )
         )
-        for domain_id, availability
-        in fault_domain_availability.items()
+        for domain_id in topology_domain_ids
     }
 
     domain_recovery_probabilities = {
@@ -658,22 +670,22 @@ def build_markov_failure_process(
     }
 
     node_failure_probabilities = {
-        site.node.node_id: (
+        node.node_id: (
             _failure_probability_from_availability(
                 availability=(
-                    site.node.reliability
+                    node.reliability
                 ),
                 recovery_probability=(
                     node_recovery_probability
                 ),
             )
         )
-        for site in topology.sites
+        for node in topology.compute_nodes
     }
 
     node_recovery_probabilities = {
-        site.node.node_id: node_recovery_probability
-        for site in topology.sites
+        node.node_id: node_recovery_probability
+        for node in topology.compute_nodes
     }
 
     return MarkovFailureProcess(
@@ -690,6 +702,6 @@ def build_markov_failure_process(
         node_recovery_probabilities=(
             node_recovery_probabilities
         ),
-        random_seed= selected_random_seed,
+        random_seed=selected_random_seed,
     )
 
