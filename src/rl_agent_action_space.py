@@ -5,10 +5,6 @@ from enum import IntEnum
 
 import numpy as np
 
-from src.slow_timescale_rl_env import (
-    SlowControlAction,
-)
-
 
 class RetentionPolicy(IntEnum):
     """慢层允许的 Serverless 实例保留等级。"""
@@ -204,11 +200,10 @@ class DDQNAction(IntEnum):
 
 
 _LEGACY_AGENT_TO_ENVIRONMENT_ACTION = {
-    DDQNAction.COLD: SlowControlAction.COLD,
-    DDQNAction.HOT: SlowControlAction.HOT,
-    DDQNAction.DYNAMIC: (
-        SlowControlAction.DYNAMIC
-    ),
+    # 旧冷备和动态策略都对应“两副本、主副本保温、仅边缘”。
+    DDQNAction.COLD: 2,
+    DDQNAction.HOT: 4,
+    DDQNAction.DYNAMIC: 2,
 }
 
 
@@ -222,7 +217,7 @@ _LEGACY_ENVIRONMENT_TO_AGENT_ACTION = {
 def ddqn_action_to_environment_action(
     action: int | DDQNAction,
 ) -> int:
-    """临时把旧三动作编号映射到尚未迁移的环境动作。"""
+    """临时把旧三动作编号映射到新的结构化动作编号。"""
 
     try:
         ddqn_action = DDQNAction(int(action))
@@ -240,27 +235,17 @@ def ddqn_action_to_environment_action(
 
 
 def environment_action_to_ddqn_action(
-    action: int | SlowControlAction,
+    action: int,
 ) -> int:
-    """临时把非 SINGLE 的旧环境动作映射回旧三动作编号。"""
+    """临时把可兼容的结构化动作编号映射回旧三动作编号。"""
 
     try:
-        environment_action = SlowControlAction(
-            int(action)
-        )
-    except ValueError as error:
+        environment_action = int(action)
+    except (TypeError, ValueError) as error:
         raise ValueError(
             f"非法环境动作：{action}。"
         ) from error
 
-    if environment_action is SlowControlAction.SINGLE:
-        raise ValueError(
-            "SINGLE只作为对比基线，"
-            "不属于Double DQN动作空间。"
-        )
-
-    return int(
-        _LEGACY_ENVIRONMENT_TO_AGENT_ACTION[
-            environment_action
-        ]
-    )
+    if environment_action not in _LEGACY_ENVIRONMENT_TO_AGENT_ACTION:
+        raise ValueError("该结构化动作没有唯一的旧三动作映射。")
+    return int(_LEGACY_ENVIRONMENT_TO_AGENT_ACTION[environment_action])

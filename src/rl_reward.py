@@ -9,8 +9,8 @@ rl_reward.py
     total_cost = run_cost + route_cost + cold_start_cost
     reward = -(normalized_total_cost + violation_penalty)
 
-旧的五权重奖励接口暂时保留，供尚未迁移的 RL 环境使用；
-环境在后续原子迁移完成后会删除旧接口。
+旧的五权重奖励接口暂时保留，供尚未迁移的演示和训练入口使用；
+这些调用方在下一步迁移后会与旧接口一起删除。
 """
 
 from dataclasses import dataclass
@@ -197,6 +197,20 @@ class RLWindowMetrics:
 
     reconfigured_function_stages: int
 
+    # 以下字段直接汇总共享快层执行器的结果。默认值用于兼容尚未迁移的统计代码；
+    # 正式 DDQN 环境会显式填写这些字段，便于论文逐项报告原始结果。
+    total_run_cost: float = 0.0
+    total_route_cost: float = 0.0
+    total_cold_start_cost: float = 0.0
+    fast_repair_attempts: int = 0
+    fast_repair_successes: int = 0
+    fast_repair_failures: int = 0
+    constraint_rejected_batches: int = 0
+    cloud_used_slots: int = 0
+    cloud_usage_rate: float = 0.0
+    minimum_exact_sfc_reliability: float = 0.0
+    mean_exact_sfc_reliability: float = 0.0
+
     def __post_init__(self) -> None:
         """
         检查窗口指标是否合法。
@@ -213,6 +227,11 @@ class RLWindowMetrics:
             self.failover_function_stages,
             self.cold_start_function_stages,
             self.reconfigured_function_stages,
+            self.fast_repair_attempts,
+            self.fast_repair_successes,
+            self.fast_repair_failures,
+            self.constraint_rejected_batches,
+            self.cloud_used_slots,
         )
 
         if any(value < 0 for value in integer_values):
@@ -235,6 +254,11 @@ class RLWindowMetrics:
             self.total_cold_start_delay_ms,
             self.average_active_memory_mb,
             self.total_active_memory_mb_seconds,
+            self.total_run_cost,
+            self.total_route_cost,
+            self.total_cold_start_cost,
+            self.minimum_exact_sfc_reliability,
+            self.mean_exact_sfc_reliability,
         )
 
         if any(
@@ -245,6 +269,27 @@ class RLWindowMetrics:
             raise ValueError(
                 "连续窗口指标必须是非负有限数值。"
             )
+
+        if self.fast_repair_successes + self.fast_repair_failures > (
+            self.fast_repair_attempts
+        ):
+            raise ValueError("快层修复成功数与失败数不能超过尝试数。")
+        if not 0.0 <= self.cloud_usage_rate <= 1.0:
+            raise ValueError("中心云使用率必须位于 [0, 1]。")
+        if not 0.0 <= self.minimum_exact_sfc_reliability <= 1.0:
+            raise ValueError("最小精确可靠性必须位于 [0, 1]。")
+        if not 0.0 <= self.mean_exact_sfc_reliability <= 1.0:
+            raise ValueError("平均精确可靠性必须位于 [0, 1]。")
+
+    @property
+    def total_cost(self) -> float:
+        """返回简化奖励使用的三项原始成本之和。"""
+
+        return (
+            self.total_run_cost
+            + self.total_route_cost
+            + self.total_cold_start_cost
+        )
 
 
 @dataclass(frozen=True)
