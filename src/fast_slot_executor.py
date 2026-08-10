@@ -15,7 +15,7 @@ from src.entities import (
 from src.failure_process import InfrastructureState
 from src.fast_optimizer import FastFeasibilityOptimizer
 from src.network import TransferNetworkProtocol
-from src.rl_agent_action_space import RetentionPolicy
+from src.deployment_policies import RetentionPolicy
 from src.runtime_reliability import (
     ReplicaPlannerProtocol,
     SingleReplicaPlanner,

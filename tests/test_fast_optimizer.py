@@ -20,7 +20,7 @@ from src.network import (
     TransferNetworkProtocol,
 )
 from src.reliability import FaultDomainReliabilityModel
-from src.rl_agent_action_space import (
+from src.deployment_policies import (
     CloudPolicy,
     RetentionPolicy,
 )

@@ -2,15 +2,12 @@
 """
 rl_reward.py
 
-本文件定义双时间尺度强化学习环境的奖励函数。
-
-正式 DDQN 将使用简化奖励：
+本文件定义双时间尺度强化学习环境的简化奖励函数：
 
     total_cost = run_cost + route_cost + cold_start_cost
     reward = -(normalized_total_cost + violation_penalty)
 
-旧的五权重奖励接口暂时保留，供尚未迁移的演示和训练入口使用；
-这些调用方在下一步迁移后会与旧接口一起删除。
+仅保留论文主算法实际使用的三项成本和单一硬违约项，避免引入额外权重。
 """
 
 from dataclasses import dataclass
@@ -108,65 +105,6 @@ def calculate_cost_reward(
     )
 
 
-# 以下接口是旧 RL 环境的迁移期兼容代码。
-@dataclass(frozen=True)
-class RLRewardWeights:
-    """
-    强化学习奖励权重。
-    """
-
-    delay: float
-    memory: float
-    cold_start: float
-    sla_violation: float
-    reconfiguration: float
-
-    def __post_init__(self) -> None:
-        """
-        检查奖励权重。
-        """
-
-        values = (
-            self.delay,
-            self.memory,
-            self.cold_start,
-            self.sla_violation,
-            self.reconfiguration,
-        )
-
-        if any(
-            not math.isfinite(value)
-            for value in values
-        ):
-            raise ValueError(
-                "奖励权重必须是有限数值。"
-            )
-
-        if any(value < 0 for value in values):
-            raise ValueError(
-                "奖励权重不能小于0。"
-            )
-
-        if sum(values) <= 0:
-            raise ValueError(
-                "至少需要一个大于0的奖励权重。"
-            )
-
-    @property
-    def total_weight(self) -> float:
-        """
-        返回所有权重之和。
-        """
-
-        return (
-            self.delay
-            + self.memory
-            + self.cold_start
-            + self.sla_violation
-            + self.reconfiguration
-        )
-
-
 @dataclass(frozen=True)
 class RLWindowMetrics:
     """
@@ -197,8 +135,7 @@ class RLWindowMetrics:
 
     reconfigured_function_stages: int
 
-    # 以下字段直接汇总共享快层执行器的结果。默认值用于兼容尚未迁移的统计代码；
-    # 正式 DDQN 环境会显式填写这些字段，便于论文逐项报告原始结果。
+    # 以下字段直接汇总共享快层执行器的结果，便于论文逐项报告原始结果。
     total_run_cost: float = 0.0
     total_route_cost: float = 0.0
     total_cold_start_cost: float = 0.0
@@ -290,152 +227,3 @@ class RLWindowMetrics:
             + self.total_route_cost
             + self.total_cold_start_cost
         )
-
-
-@dataclass(frozen=True)
-class RLRewardBreakdown:
-    """
-    奖励函数的分项结果。
-    """
-
-    normalized_delay: float
-    normalized_memory: float
-    normalized_cold_start: float
-    normalized_sla_violation: float
-    normalized_reconfiguration: float
-
-    weighted_cost: float
-    reward: float
-
-
-def calculate_rl_reward(
-    metrics: RLWindowMetrics,
-    deadline_ms: float,
-    maximum_active_memory_mb: float,
-    maximum_cold_start_delay_ms_per_batch: float,
-    function_count: int,
-    weights: RLRewardWeights,
-) -> RLRewardBreakdown:
-    """
-    计算一个慢时间尺度窗口的奖励。
-
-    Parameters
-    ----------
-    metrics:
-        当前窗口运行指标。
-
-    deadline_ms:
-        SFC时延约束。
-
-    maximum_active_memory_mb:
-        全热备情况下的最大活动内存。
-
-    maximum_cold_start_delay_ms_per_batch:
-        一批请求中全部函数都冷启动时的最大启动时延。
-
-    function_count:
-        SFC函数数量。
-
-    weights:
-        奖励权重。
-    """
-
-    if deadline_ms <= 0:
-        raise ValueError(
-            "SFC时延约束必须大于0。"
-        )
-
-    if maximum_active_memory_mb <= 0:
-        raise ValueError(
-            "最大活动内存必须大于0。"
-        )
-
-    if maximum_cold_start_delay_ms_per_batch <= 0:
-        raise ValueError(
-            "最大冷启动时延必须大于0。"
-        )
-
-    if function_count <= 0:
-        raise ValueError(
-            "函数数量必须大于0。"
-        )
-
-    # 成功请求的平均时延归一化。
-    #
-    # 超过deadline的部分由SLA违反项惩罚，
-    # 因此这里截断到1。
-    normalized_delay = min(
-        metrics.average_successful_delay_ms
-        / deadline_ms,
-        1.0,
-    )
-
-    normalized_memory = min(
-        metrics.average_active_memory_mb
-        / maximum_active_memory_mb,
-        1.0,
-    )
-
-    if metrics.request_batches > 0:
-        cold_start_denominator = (
-            maximum_cold_start_delay_ms_per_batch
-            * metrics.request_batches
-        )
-
-        normalized_cold_start = min(
-            metrics.total_cold_start_delay_ms
-            / cold_start_denominator,
-            1.0,
-        )
-    else:
-        normalized_cold_start = 0.0
-
-    normalized_sla_violation = (
-        metrics.sla_violation_rate
-    )
-
-    normalized_reconfiguration = min(
-        metrics.reconfigured_function_stages
-        / function_count,
-        1.0,
-    )
-
-    weighted_sum = (
-        weights.delay
-        * normalized_delay
-        +
-        weights.memory
-        * normalized_memory
-        +
-        weights.cold_start
-        * normalized_cold_start
-        +
-        weights.sla_violation
-        * normalized_sla_violation
-        +
-        weights.reconfiguration
-        * normalized_reconfiguration
-    )
-
-    weighted_cost = (
-        weighted_sum
-        / weights.total_weight
-    )
-
-    reward = -weighted_cost
-
-    return RLRewardBreakdown(
-        normalized_delay=normalized_delay,
-        normalized_memory=normalized_memory,
-        normalized_cold_start=(
-            normalized_cold_start
-        ),
-        normalized_sla_violation=(
-            normalized_sla_violation
-        ),
-        normalized_reconfiguration=(
-            normalized_reconfiguration
-        ),
-        weighted_cost=weighted_cost,
-        reward=reward,
-    )

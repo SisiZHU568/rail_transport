@@ -12,7 +12,7 @@ from src.entities import (
     SlotConstraintAudit,
 )
 from src.network import TransferNetworkProtocol
-from src.rl_agent_action_space import CloudPolicy
+from src.deployment_policies import CloudPolicy
 from src.topology import LinearRailTopology
 from src.two_timescale_control import (
     FastTimescaleDecision,
@@ -566,13 +566,31 @@ class FastFeasibilityOptimizer:
         # 对执行路径、接管和冷启动具有不同含义。
         per_function_options = tuple(
             tuple(
-                permutations(
-                    operational_ids,
-                    required_counts[function_id],
+                node_ids
+                for node_ids in permutations(
+                    operational_ids, required_counts[function_id]
+                )
+                # CPU 只由实际执行的主副本消耗。若单个 VNF 的请求需求
+                # 已超过主节点容量，该排列无论其他 VNF 如何部署都不可能
+                # 可行，应在笛卡尔积之前剪枝，避免规模化环境搜索爆炸。
+                if (
+                    state.request_count == 0
+                    or self.function_map[function_id].cpu_demand(
+                        state.request_count
+                    )
+                    <= self.node_map[node_ids[0]].cpu_capacity
                 )
             )
             for function_id in state.function_ids
         )
+        if any(not options for options in per_function_options):
+            return self._failure_result(
+                state=state,
+                initial_decision=initial_decision,
+                initial_audit=initial_audit,
+                reason="至少一个 VNF 在当前请求量下没有可承载其 CPU 的主节点。",
+                evaluated_candidate_count=0,
+            )
         ranked_candidates: list[
             tuple[
                 tuple[

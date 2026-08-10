@@ -693,15 +693,24 @@ git commit -m "refactor: execute explicit per-function SFC intents"
 ### Task 8: Build the DPPO slow environment and remove the retired environment
 
 **Files:**
+- Create: `src/deployment_policies.py`
 - Create: `src/slow_timescale_execution_core.py`
 - Create: `src/dppo_slow_timescale_env.py`
 - Create: `src/dppo_scenario.py`
 - Create: `tests/test_slow_timescale_execution_core.py`
 - Create: `tests/test_dppo_slow_timescale_env.py`
 - Modify: `run_rl_environment_demo.py`
+- Modify: `configs/debug.yaml`
+- Modify: `src/fast_optimizer.py`
+- Modify: `src/fast_slot_executor.py`
 - Modify: `src/rl_reward.py`
+- Modify: `src/two_timescale_control.py`
 - Modify: `tests/test_rl_reward.py`
 - Modify: `tests/test_active_algorithm_scope.py`
+- Modify: `tests/test_fast_optimizer.py`
+- Modify: `tests/test_fast_slot_executor.py`
+- Modify: `tests/test_scenario_dimensions.py`
+- Modify: `tests/test_two_timescale_control.py`
 - Delete: `src/slow_timescale_rl_env.py`
 - Delete: `src/rl_scenario.py`
 - Delete: `tests/test_slow_timescale_rl_env.py`
@@ -710,7 +719,7 @@ git commit -m "refactor: execute explicit per-function SFC intents"
 - Delete: `src/rl_state_encoder.py`
 - Delete: `tests/test_rl_state_encoder.py`
 
-- [ ] **Step 1: Write failing causal DPPO environment tests**
+- [x] **Step 1: Write failing causal DPPO environment tests**
 
 Tests must assert the shared core owns the pre-generated exogenous trace and exposes only the observed prefix, reset returns `dimensions.state_dim`, step accepts exactly `dimensions.action_dim`, future request changes do not alter current state, one slow step calls the fast executor once per fast slot, projection failure advances with a violation, and `info` contains raw action, clipped action, decoded action, projection result, final metrics, and next observation.
 
@@ -728,11 +737,11 @@ def test_step_exposes_raw_projected_and_final_results(dppo_environment) -> None:
     } <= info.keys()
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_slow_timescale_env.py`; expect missing environment failure.
 
-- [ ] **Step 3: Implement the DPPO-only environment atomically**
+- [x] **Step 3: Implement the DPPO-only environment atomically**
 
 Move the approved pre-generated exogenous trace, observed-request-prefix boundary, time advancement, fast-slot loop, and window metric aggregation into `SlowTimescaleExecutionCore`. The DPPO environment owns action clipping, decoding, projection, intent adaptation, reward, and learner-facing `info`, while the core remains algorithm-independent. On projection success convert with `DPPOIntentAdapter` and execute every slot; on failure do not call the executor and ask the core to advance the rejected window. Retain only `RLWindowCostMetrics`, `RLCostRewardBreakdown`, `RLWindowMetrics`, and `calculate_cost_reward`; remove legacy weighted reward classes and tests. Replace the demo with a deterministic zero-action DPPO smoke step. Delete retired environment/scenario/action/state files only after all imports use the DPPO replacements. Task 6 deliberately defers the old action/state deletion to this atomic migration because the intermediate shared fast layer and retired environment still import those modules.
 
@@ -763,13 +772,13 @@ class DPPOSlowTimescaleEnvironment:
         return self._build_step_result(raw_action, clipped_action, projection, execution)
 ```
 
-- [ ] **Step 4: Run environment and shared integration tests**
+- [x] **Step 4: Run environment and shared integration tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_slow_timescale_execution_core.py tests/test_dppo_slow_timescale_env.py tests/test_rl_reward.py tests/test_fast_slot_executor_intent.py tests/test_config.py tests/test_active_algorithm_scope.py
 ```
 
-- [ ] **Step 5: Commit DPPO environment**
+- [x] **Step 5: Commit DPPO environment**
 
 ```powershell
 git add -A

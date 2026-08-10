@@ -530,17 +530,22 @@ rl_environment:
   # reset() 未显式指定随机种子时使用的默认种子
   default_seed: 8000
 
-  # 奖励函数各组成部分的权重
-  #
-  # 奖励范围近似为 [-1, 0]：
-  # 系统成本越低，奖励越接近0；
-  # 系统表现越差，奖励越接近-1。
-  reward_weights:
-    delay: 0.20
-    memory: 0.20
-    cold_start: 0.15
-    sla_violation: 0.40
-    reconfiguration: 0.05
+  workload_prediction:
+    lookback_slots: 10
+    baseline_request_rate: 1.0
+
+  state_normalization:
+    maximum_request_rate: 5.0
+    maximum_network_delay_ms: 200.0
+    maximum_input_size_mb: 10.0
+
+  cost_rates:
+    edge_cpu_cost_per_unit: 0.01
+    edge_memory_cost_per_mb_second: 0.001
+    cloud_cpu_cost_per_unit: 0.05
+    cloud_memory_cost_per_mb_second: 0.005
+    cold_start_cost_per_ms: 0.10
+    maximum_window_cost: 10000.0
 
 # ============================================================
 # DPPO 主算法配置

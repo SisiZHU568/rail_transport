@@ -25,7 +25,7 @@ from src.redundancy_placement import (
     ReliabilityAwareReplicaPlanner,
 )
 from src.reliability import FaultDomainReliabilityModel
-from src.rl_agent_action_space import (
+from src.deployment_policies import (
     CloudPolicy,
     RetentionPolicy,
 )

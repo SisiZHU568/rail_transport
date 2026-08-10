@@ -5,7 +5,7 @@ from copy import deepcopy
 import pytest
 
 from src.config import load_config
-from src.rl_scenario import build_rl_functions, build_rl_sfc
+from src.dppo_scenario import build_rl_functions, build_rl_sfc
 from src.scenario_dimensions import ScenarioDimensions
 from src.topology import build_linear_topology
 

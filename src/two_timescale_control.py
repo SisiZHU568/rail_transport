@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
-from src.rl_agent_action_space import (
+from src.deployment_policies import (
     CloudPolicy,
     RetentionPolicy,
 )

@@ -7,6 +7,8 @@ from src.config import load_config
 
 # 拆开拼接旧算法名称，避免本测试文件的名字或常量本身被误判。
 RETIRED_TOKEN = "d" + "dqn"
+RETIRED_DISPLAY_NAME = "double " + "dqn"
+RETIRED_FULL_NAME = "double deep " + "q-network"
 
 
 def test_active_tree_has_no_retired_named_files() -> None:
@@ -34,3 +36,31 @@ def test_config_has_no_retired_sections() -> None:
     config = load_config("configs/debug.yaml")
 
     assert all(RETIRED_TOKEN not in key.lower() for key in config)
+
+
+def test_active_source_and_config_content_has_no_retired_algorithm() -> None:
+    """活动代码、测试、配置和运行入口不得继续引用退役算法。"""
+
+    root = Path(__file__).resolve().parents[1]
+    candidates = (
+        tuple((root / "src").rglob("*.py"))
+        + tuple((root / "tests").rglob("*.py"))
+        + tuple((root / "configs").glob("*.yaml"))
+        + tuple(root.glob("run_*.py"))
+    )
+    offenders: list[str] = []
+    for path in candidates:
+        if "__pycache__" in path.parts:
+            continue
+        content = path.read_text(encoding="utf-8").lower()
+        if any(
+            retired_name in content
+            for retired_name in (
+                RETIRED_TOKEN,
+                RETIRED_DISPLAY_NAME,
+                RETIRED_FULL_NAME,
+            )
+        ):
+            offenders.append(path.relative_to(root).as_posix())
+
+    assert offenders == []
