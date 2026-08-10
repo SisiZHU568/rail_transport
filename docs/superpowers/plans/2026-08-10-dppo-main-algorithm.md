@@ -65,7 +65,7 @@ Retired modules are deleted only after their replacements or their consumers are
 - Delete: `docs/superpowers/plans/2026-08-07-ddqn-state-action-redesign.md`
 - Delete: all 16 tracked `results/figures/ddqn_*` and `results/tables/ddqn_*` files listed by `git ls-files`
 
-- [ ] **Step 1: Write the failing active-scope test**
+- [x] **Step 1: Write the failing active-scope test**
 
 ```python
 from pathlib import Path
@@ -94,7 +94,7 @@ def test_config_has_no_retired_sections() -> None:
     assert all(RETIRED_TOKEN not in key.lower() for key in config)
 ```
 
-- [ ] **Step 2: Run the scope test and verify RED**
+- [x] **Step 2: Run the scope test and verify RED**
 
 Run:
 
@@ -104,11 +104,11 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: FAIL listing the tracked retired algorithm files and configuration keys.
 
-- [ ] **Step 3: Delete only the verified targets and remove configuration sections**
+- [x] **Step 3: Delete only the verified targets and remove configuration sections**
 
 Use `git ls-files` to reprint the exact target list immediately before deletion. Delete the text files with `apply_patch`; delete each tracked binary PNG with `Remove-Item -LiteralPath` using its full verified path. Remove the complete retired-algorithm training, evaluation, and statistics YAML mappings without touching shared topology, failure, reliability, or cost mappings. Make `paired_statistics.py` algorithm-neutral by requiring an explicit `reference_policy` and building conclusion text from that value; update its tests to use neutral policy names. Replace the old algorithm name in the shared TTL module docstring with “legacy discrete controller” without changing TTL behavior.
 
-- [ ] **Step 4: Verify GREEN and run remaining public tests**
+- [x] **Step 4: Verify GREEN and run remaining public tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_active_algorithm_scope.py tests/test_network.py tests/test_fast_slot_executor.py tests/test_reliability.py
@@ -116,7 +116,7 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: PASS. Record removed paths and note that they remain recoverable from commit `9cc5a6e`.
 
-- [ ] **Step 5: Commit cleanup**
+- [x] **Step 5: Commit cleanup**
 
 ```powershell
 git add -A

@@ -45,7 +45,7 @@ ReplicaKey = tuple[int, int]
 
 class TTLAction(IntEnum):
     """
-    Double-DQN 的四个离散 TTL 动作。
+    旧版离散控制器使用的四个 TTL 动作。
 
     动作编号只表示在 ttl_slot_options 中的索引，
     实际 TTL 快时隙数由配置决定。
