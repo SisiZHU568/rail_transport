@@ -317,7 +317,7 @@ git commit -m "feat: add configuration-driven DPPO action space"
 - Create: `src/dppo_intent_adapter.py`
 - Create: `tests/test_dppo_projection.py`
 
-- [ ] **Step 1: Write failing projection tests**
+- [x] **Step 1: Write failing projection tests**
 
 ```python
 import numpy as np
@@ -353,11 +353,11 @@ def test_projection_skips_failed_nodes_and_spreads_fault_domains() -> None:
     assert len({result.fault_domains[node_id] for node_id in intent.preferred_node_ids}) >= 2
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_projection.py`; expect missing projector failure.
 
-- [ ] **Step 3: Implement intent and projection result types**
+- [x] **Step 3: Implement intent and projection result types**
 
 Create `FunctionDeploymentIntent`, `SFCDeploymentIntent`, `ProjectionResourceDemand`, `ProjectionResult`, and `DPPOIntentAdapter`. The projector must traverse the actor's complete node ranking, select unique operational nodes, prefer unused fault domains until `minimum_distinct_fault_domains` is met, then fill remaining replicas. It must return `function_intents=None` with machine-readable reasons when CPU, memory, node count, or fault-domain necessary conditions cannot be met. It must report changed assignments divided by requested assignment count as `change_ratio`. The adapter is the only code that attaches `decision_slot`, `valid_until_slot`, and `source_algorithm="dppo"` to a successful projection.
 
@@ -411,13 +411,13 @@ class DPPOIntentAdapter:
         )
 ```
 
-- [ ] **Step 4: Run projection and constraint tests**
+- [x] **Step 4: Run projection and constraint tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_projection.py tests/test_constraint_audit.py
 ```
 
-- [ ] **Step 5: Commit projector**
+- [x] **Step 5: Commit projector**
 
 ```powershell
 git add src/sfc_deployment_intent.py src/dppo_projection.py src/dppo_intent_adapter.py tests/test_dppo_projection.py
