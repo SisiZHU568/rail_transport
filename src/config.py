@@ -112,6 +112,27 @@ def validate_config(config: dict[str, Any]) -> None:
     if not math.isclose(sum(float(value) for value in fractions), 1.0):
         raise ValueError("数据集切分比例之和必须为 1。")
     _require_positive_integer(dataset, "episodes")
+    teacher_names = dataset.get("teacher_names")
+    allowed_teachers = {"cost", "reliability", "balanced"}
+    if (
+        not isinstance(teacher_names, list)
+        or not teacher_names
+        or any(
+            not isinstance(name, str) or name not in allowed_teachers
+            for name in teacher_names
+        )
+        or len(teacher_names) != len(set(teacher_names))
+    ):
+        raise ValueError(
+            "dppo.dataset.teacher_names 必须是由 cost、reliability、balanced "
+            "组成的非空无重复列表。"
+        )
+    _require_positive_integer(dataset, "max_slow_steps_per_episode")
+    seed_start = dataset.get("seed_start")
+    split_seed = dataset.get("split_seed")
+    for key, value in (("seed_start", seed_start), ("split_seed", split_seed)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"dppo.dataset.{key} 必须是非负整数。")
 
     _require_mapping(dppo, "training")
 

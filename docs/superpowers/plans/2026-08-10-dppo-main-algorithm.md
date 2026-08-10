@@ -873,8 +873,10 @@ git commit -m "feat: add causal simulation teachers for DPPO"
 - Create: `tests/test_dppo_dataset.py`
 - Create: `run_dppo_dataset_generation.py`
 - Modify: `configs/debug.yaml`
+- Modify: `src/config.py`
+- Modify: `tests/test_config.py`
 
-- [ ] **Step 1: Write failing schema and split tests**
+- [x] **Step 1: Write failing schema and split tests**
 
 Create records for six Episode seeds, split them, and assert no seed appears in two partitions, state/action shapes match metadata, rejected records remain in diagnostics but not behavior-cloning samples, and save/load preserves arrays and schema versions exactly.
 
@@ -906,11 +908,11 @@ def test_episode_seeds_never_cross_dataset_partitions(tmp_path) -> None:
     assert seed_sets["validation"].isdisjoint(seed_sets["test"])
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_dataset.py`; expect missing dataset module.
 
-- [ ] **Step 3: Implement records, grouped split, NPZ persistence, and CLI**
+- [x] **Step 3: Implement records, grouped split, NPZ persistence, and CLI**
 
 Use frozen `ExpertTransitionRecord` and `ExpertDatasetMetadata`. For each teacher proposal, run the same projector, intent adapter, constraint audit, and fast executor used by online DPPO; only `final_feasible=true` records enter behavior cloning, while rejected proposals enter diagnostics with explicit reasons. Store numeric arrays in compressed NPZ and metadata/config hash in UTF-8 JSON beside it. Split unique Episode seeds deterministically using configured train/validation/test fractions that sum to one. The CLI accepts `--episodes`, `--output-root`, and `--seed-start`; it must never default to a formal result path during tests.
 
@@ -938,7 +940,7 @@ class ExpertDatasetMetadata:
     config_hash: str
 ```
 
-- [ ] **Step 4: Run dataset generation smoke test in temporary storage**
+- [x] **Step 4: Run dataset generation smoke test in temporary storage**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_dataset.py
@@ -947,7 +949,7 @@ $smokeRoot=Join-Path $env:TEMP 'dppo-dataset-smoke'; D:\Anaconda3\python.exe -X 
 
 Expected: train/validation/test or diagnostics artifacts exist under the temporary root with no repository changes.
 
-- [ ] **Step 5: Commit dataset pipeline**
+- [x] **Step 5: Commit dataset pipeline**
 
 ```powershell
 git add src/dppo_dataset.py tests/test_dppo_dataset.py run_dppo_dataset_generation.py configs/debug.yaml

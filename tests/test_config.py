@@ -62,3 +62,23 @@ def test_validate_config_rejects_unencodable_replica_threshold() -> None:
 
     with pytest.raises(ValueError, match=r"replica_threshold.*\(-1, 1\]"):
         validate_config(config)
+
+
+def test_validate_config_requires_known_nonempty_dataset_teachers() -> None:
+    """数据生成教师必须在配置中显式声明且名称可识别。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["dataset"]["teacher_names"] = ["unknown"]
+
+    with pytest.raises(ValueError, match="teacher_names"):
+        validate_config(config)
+
+
+def test_validate_config_requires_positive_dataset_slow_steps() -> None:
+    """每条 Episode 的采集上限不能写死，也不能配置为零。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["dataset"]["max_slow_steps_per_episode"] = 0
+
+    with pytest.raises(ValueError, match="max_slow_steps_per_episode"):
+        validate_config(config)
