@@ -507,17 +507,16 @@ git commit -m "feat: track continuous DPPO replica retention"
 
 ---
 
-### Task 6: Replace the retired action/state modules with a DPPO state encoder
+### Task 6: Add the DPPO state encoder before retiring old consumers
 
 **Files:**
 - Create: `src/dppo_state_encoder.py`
 - Create: `tests/test_dppo_state_encoder.py`
-- Delete: `src/rl_agent_action_space.py`
-- Delete: `tests/test_rl_agent_action_space.py`
-- Delete: `src/rl_state_encoder.py`
-- Delete: `tests/test_rl_state_encoder.py`
+- Retain temporarily: `src/rl_agent_action_space.py`, `src/rl_state_encoder.py`, and
+  their tests until Tasks 7-8 remove their remaining consumers. Deleting them here
+  would make the intermediate branch unimportable.
 
-- [ ] **Step 1: Write failing dynamic-state and history tests**
+- [x] **Step 1: Write failing dynamic-state and history tests**
 
 Construct snapshots for `(M=3,F=2)`, `(M=5,F=3)`, and `(M=8,F=3)`. Assert `encoded.shape == (dimensions.state_dim,)`, all values are finite in `[0,1]`, and the last 11 values encode mean replica count, three-replica ratio, primary/backup retention, projection-change ratio, hot/cloud ratios, success, SLA violation, cost, and repair-failure rate in that exact order.
 
@@ -541,13 +540,13 @@ def test_state_shape_is_derived_from_configuration(
     assert encoder.feature_names[-11:] == DPPO_HISTORY_FEATURE_NAMES
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_state_encoder.py`; expect missing encoder failure.
 
-- [ ] **Step 3: Implement DPPO-only state types and remove retired modules**
+- [x] **Step 3: Implement DPPO-only state types and record deferred retirement**
 
-Copy only the validated mobility, node, VNF, and SFC feature formulas into `DPPOStateSnapshot`, `DPPOHistoryObservation`, `DPPOHistoryEncoder`, and `DPPOStateEncoder`. Build feature names from `ScenarioDimensions` order. Do not import any retired action type. After all imports are updated in the same patch, delete both retired modules and their tests.
+Copy only the validated mobility, node, VNF, and SFC feature formulas into `DPPOStateSnapshot`, `DPPOHistoryObservation`, `DPPOHistoryEncoder`, and `DPPOStateEncoder`. Build feature names from `ScenarioDimensions` order. Do not import any retired action type. The import audit found that the shared fast executor and retired environment still consume the old action/state modules; keep those files unchanged in this task and delete them atomically in Task 8 after Tasks 7-8 remove every consumer.
 
 ```python
 DPPO_HISTORY_FEATURE_NAMES = (
@@ -583,17 +582,17 @@ class DPPOStateEncoder:
         return encoded
 ```
 
-- [ ] **Step 4: Run state, action, projection, and active-scope tests**
+- [x] **Step 4: Run state, action, projection, and active-scope tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_state_encoder.py tests/test_dppo_action_space.py tests/test_dppo_projection.py tests/test_active_algorithm_scope.py
 ```
 
-- [ ] **Step 5: Commit DPPO state migration**
+- [x] **Step 5: Commit DPPO state encoder**
 
 ```powershell
-git add -A
-git commit -m "refactor: replace retired RL state and action modules"
+git add src/dppo_state_encoder.py tests/test_dppo_state_encoder.py docs/superpowers/plans/2026-08-10-dppo-main-algorithm.md
+git commit -m "feat: add configuration-driven DPPO state encoder"
 ```
 
 ---
@@ -702,6 +701,10 @@ git commit -m "refactor: execute explicit per-function SFC intents"
 - Delete: `src/slow_timescale_rl_env.py`
 - Delete: `src/rl_scenario.py`
 - Delete: `tests/test_slow_timescale_rl_env.py`
+- Delete: `src/rl_agent_action_space.py`
+- Delete: `tests/test_rl_agent_action_space.py`
+- Delete: `src/rl_state_encoder.py`
+- Delete: `tests/test_rl_state_encoder.py`
 
 - [ ] **Step 1: Write failing causal DPPO environment tests**
 
@@ -727,7 +730,7 @@ Run `pytest -q -p no:cacheprovider tests/test_dppo_slow_timescale_env.py`; expec
 
 - [ ] **Step 3: Implement the DPPO-only environment atomically**
 
-Move the approved pre-generated exogenous trace, observed-request-prefix boundary, time advancement, fast-slot loop, and window metric aggregation into `SlowTimescaleExecutionCore`. The DPPO environment owns action clipping, decoding, projection, intent adaptation, reward, and learner-facing `info`, while the core remains algorithm-independent. On projection success convert with `DPPOIntentAdapter` and execute every slot; on failure do not call the executor and ask the core to advance the rejected window. Retain only `RLWindowCostMetrics`, `RLCostRewardBreakdown`, `RLWindowMetrics`, and `calculate_cost_reward`; remove legacy weighted reward classes and tests. Replace the demo with a deterministic zero-action DPPO smoke step. Delete retired environment/scenario files only after all imports use `dppo_scenario`.
+Move the approved pre-generated exogenous trace, observed-request-prefix boundary, time advancement, fast-slot loop, and window metric aggregation into `SlowTimescaleExecutionCore`. The DPPO environment owns action clipping, decoding, projection, intent adaptation, reward, and learner-facing `info`, while the core remains algorithm-independent. On projection success convert with `DPPOIntentAdapter` and execute every slot; on failure do not call the executor and ask the core to advance the rejected window. Retain only `RLWindowCostMetrics`, `RLCostRewardBreakdown`, `RLWindowMetrics`, and `calculate_cost_reward`; remove legacy weighted reward classes and tests. Replace the demo with a deterministic zero-action DPPO smoke step. Delete retired environment/scenario/action/state files only after all imports use the DPPO replacements. Task 6 deliberately defers the old action/state deletion to this atomic migration because the intermediate shared fast layer and retired environment still import those modules.
 
 Extend `test_active_algorithm_scope.py` with a content scan over `src/**/*.py`, `tests/**/*.py`, `configs/*.yaml`, and root `run_*.py`. Build both the retired short token and the retired full algorithm name from string fragments inside the test so the test does not flag itself. Assert neither value occurs in an active file; the two approved design/plan archive-recovery notes are outside this scan.
 
