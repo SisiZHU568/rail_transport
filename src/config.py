@@ -9,10 +9,111 @@ config.py
 读取后，YAML 内容会被转换成 Python 字典。
 """
 
+import math
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def _require_mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    """读取必需的字典配置，并给出比普通 ``KeyError`` 更清楚的提示。"""
+
+    value = parent.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"配置项 {key} 必须是字典。")
+    return value
+
+
+def _require_positive_integer(parent: dict[str, Any], key: str) -> int:
+    """读取严格大于零的整数配置，布尔值不能冒充整数。"""
+
+    value = parent.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"配置项 {key} 必须是正整数。")
+    return value
+
+
+def validate_config(config: dict[str, Any]) -> None:
+    """校验首版 DPPO 运行前必须确定的配置结构和取值范围。
+
+    此函数只检查跨模块都会依赖的边界。VNF、SFC 等实体的详细物理参数，
+    继续由对应数据类和 ``rl_scenario`` 构造器负责检查，避免重复实现规则。
+    """
+
+    topology = _require_mapping(config, "topology")
+    if topology.get("include_cloud") is not True:
+        raise ValueError("DPPO 平铺状态要求 topology.include_cloud=true。")
+    mec_count = _require_positive_integer(topology, "mec_count")
+    if mec_count < 2:
+        raise ValueError("支持三副本时 topology.mec_count 至少为 2。")
+    fault_domain_ids = topology.get("mec_fault_domain_ids")
+    if (
+        not isinstance(fault_domain_ids, list)
+        or len(fault_domain_ids) != mec_count
+        or any(
+            isinstance(domain_id, bool)
+            or not isinstance(domain_id, int)
+            or domain_id < 0
+            for domain_id in fault_domain_ids
+        )
+    ):
+        raise ValueError(
+            "topology.mec_fault_domain_ids 必须包含与 mec_count "
+            "相同数量的非负整数。"
+        )
+
+    scenario = _require_mapping(config, "rl_scenario")
+    functions = scenario.get("functions")
+    if not isinstance(functions, list) or not functions:
+        raise ValueError("配置项 rl_scenario.functions 必须是非空列表。")
+    if any(not isinstance(item, dict) for item in functions):
+        raise ValueError("rl_scenario.functions 中每个 VNF 必须是字典。")
+    _require_mapping(scenario, "sfc")
+
+    dppo = _require_mapping(config, "dppo")
+    action = _require_mapping(dppo, "action")
+    maximum_retention = action.get("maximum_retention_seconds")
+    if (
+        isinstance(maximum_retention, bool)
+        or not isinstance(maximum_retention, (int, float))
+        or not math.isfinite(float(maximum_retention))
+        or float(maximum_retention) <= 0.0
+    ):
+        raise ValueError("maximum_retention_seconds 必须是正有限数。")
+    replica_threshold = action.get("replica_threshold")
+    if (
+        isinstance(replica_threshold, bool)
+        or not isinstance(replica_threshold, (int, float))
+        or not math.isfinite(float(replica_threshold))
+        or not -1.0 <= float(replica_threshold) <= 1.0
+    ):
+        raise ValueError("replica_threshold 必须位于 [-1, 1]。")
+
+    diffusion = _require_mapping(dppo, "diffusion")
+    diffusion_steps = _require_positive_integer(diffusion, "steps")
+    fine_tuned_steps = _require_positive_integer(diffusion, "fine_tuned_steps")
+    if fine_tuned_steps > diffusion_steps:
+        raise ValueError("fine_tuned_steps 不能大于 diffusion.steps。")
+
+    dataset = _require_mapping(dppo, "dataset")
+    fractions = tuple(
+        dataset.get(key)
+        for key in ("train_fraction", "validation_fraction", "test_fraction")
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        or not 0.0 < float(value) < 1.0
+        for value in fractions
+    ):
+        raise ValueError("每个数据集切分比例必须位于 (0, 1)。")
+    if not math.isclose(sum(float(value) for value in fractions), 1.0):
+        raise ValueError("数据集切分比例之和必须为 1。")
+    _require_positive_integer(dataset, "episodes")
+
+    _require_mapping(dppo, "training")
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:
@@ -57,5 +158,8 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     # 本项目要求 YAML 最外层必须是键值对结构。
     if not isinstance(config, dict):
         raise ValueError("配置文件最外层必须是字典结构。")
+
+    # 配置加载后立即验证，使错误在训练或仿真开始前暴露。
+    validate_config(config)
 
     return config

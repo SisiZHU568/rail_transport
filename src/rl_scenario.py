@@ -1,4 +1,4 @@
-"""集中创建 DDQN 训练和评估使用的轨道边缘场景。"""
+"""从配置集中创建学习算法使用的轨道边缘场景。"""
 
 from typing import Any
 
@@ -27,53 +27,89 @@ from src.workload import DeterministicWorkload
 from src.workload_prediction import HistoricalWorkloadPredictor
 
 
-def build_rl_functions() -> list[ServerlessFunction]:
-    """创建论文场景中的三函数故障诊断 SFC。"""
+def _scenario_config(config: dict[str, Any]) -> dict[str, Any]:
+    """返回学习场景配置，并在缺失时给出容易定位的错误。"""
 
+    scenario = config.get("rl_scenario")
+    if not isinstance(scenario, dict):
+        raise ValueError("配置项 rl_scenario 必须是字典。")
+    return scenario
+
+
+def _require_nonnegative_integer(value: Any, name: str) -> int:
+    """拒绝布尔值、小数和字符串，避免编号在转换时被静默改变。"""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} 必须是非负整数。")
+    return value
+
+
+def build_rl_functions(config: dict[str, Any]) -> list[ServerlessFunction]:
+    """按照 YAML 列表顺序构造 VNF，不在 Python 中固定 VNF 数量。"""
+
+    records = _scenario_config(config).get("functions")
+    if not isinstance(records, list) or not records:
+        raise ValueError("rl_scenario.functions 必须是非空列表。")
+    if any(not isinstance(record, dict) for record in records):
+        raise ValueError("每个 VNF 配置必须是字典。")
+
+    function_ids = tuple(
+        _require_nonnegative_integer(record.get("function_id"), "VNF ID")
+        for record in records
+    )
+    if len(set(function_ids)) != len(function_ids):
+        raise ValueError("VNF ID 必须唯一。")
+
+    # 保持 records 的原始顺序；这个顺序会用于状态和动作向量切片。
     return [
         ServerlessFunction(
-            function_id=0,
-            name="数据清洗",
-            memory_mb=256.0,
-            cpu_cycles_per_request=20.0,
-            image_size_mb=80.0,
-            warm_exec_time_ms=15.0,
-            cold_start_time_ms=300.0,
-            output_ratio=0.7,
-        ),
-        ServerlessFunction(
-            function_id=1,
-            name="特征提取",
-            memory_mb=512.0,
-            cpu_cycles_per_request=40.0,
-            image_size_mb=150.0,
-            warm_exec_time_ms=30.0,
-            cold_start_time_ms=500.0,
-            output_ratio=0.4,
-        ),
-        ServerlessFunction(
-            function_id=2,
-            name="异常检测",
-            memory_mb=768.0,
-            cpu_cycles_per_request=60.0,
-            image_size_mb=300.0,
-            warm_exec_time_ms=50.0,
-            cold_start_time_ms=800.0,
-            output_ratio=0.1,
-        ),
+            function_id=function_id,
+            name=str(record["name"]),
+            memory_mb=float(record["memory_mb"]),
+            cpu_cycles_per_request=float(record["cpu_cycles_per_request"]),
+            image_size_mb=float(record["image_size_mb"]),
+            warm_exec_time_ms=float(record["warm_exec_time_ms"]),
+            cold_start_time_ms=float(record["cold_start_time_ms"]),
+            output_ratio=float(record["output_ratio"]),
+        )
+        for function_id, record in zip(function_ids, records, strict=True)
     ]
 
 
-def build_rl_sfc() -> SFCType:
-    """创建高可靠列车设备故障诊断 SFC。"""
+def build_rl_sfc(config: dict[str, Any]) -> SFCType:
+    """从配置构造 SFC，并确认链中没有未知、重复或遗漏的 VNF。"""
+
+    scenario = _scenario_config(config)
+    sfc_config = scenario.get("sfc")
+    if not isinstance(sfc_config, dict):
+        raise ValueError("rl_scenario.sfc 必须是字典。")
+
+    configured_ids = tuple(
+        function.function_id for function in build_rl_functions(config)
+    )
+    raw_chain = sfc_config.get("function_ids")
+    if not isinstance(raw_chain, list) or not raw_chain:
+        raise ValueError("SFC function_ids 必须是非空列表。")
+    chain = tuple(
+        _require_nonnegative_integer(function_id, "SFC VNF ID")
+        for function_id in raw_chain
+    )
+    if len(set(chain)) != len(chain) or set(chain) != set(configured_ids):
+        raise ValueError("SFC 必须且只能引用配置中声明的全部 VNF。")
+
+    try:
+        priority = ServicePriority(str(sfc_config["priority"]).lower())
+    except ValueError as error:
+        allowed = ", ".join(priority.value for priority in ServicePriority)
+        raise ValueError(f"SFC priority 必须是以下值之一：{allowed}。") from error
 
     return SFCType(
-        sfc_id=0,
-        name="高可靠列车设备故障诊断",
-        function_ids=[0, 1, 2],
-        deadline_ms=1500.0,
-        reliability_target=0.99,
-        priority=ServicePriority.CRITICAL,
+        sfc_id=_require_nonnegative_integer(sfc_config.get("sfc_id"), "SFC ID"),
+        name=str(sfc_config["name"]),
+        function_ids=list(chain),
+        deadline_ms=float(sfc_config["deadline_ms"]),
+        reliability_target=float(sfc_config["reliability_target"]),
+        priority=priority,
     )
 
 
@@ -92,19 +128,19 @@ def _rl_subconfig(
 
 
 def build_rl_environment(config: dict[str, Any]) -> SlowTimescaleRLEnvironment:
-    """创建共享 78 维状态、12 动作和快层执行闭环的完整环境。"""
+    """根据配置创建当前过渡期学习环境和共享快层执行闭环。"""
 
     topology = build_linear_topology(config)
     if topology.cloud_node is None:
-        raise ValueError("DDQN 当前状态模式要求 topology.include_cloud=true。")
+        raise ValueError("当前平铺状态模式要求 topology.include_cloud=true。")
     # 强化学习状态同时观察轨旁边缘节点和中心云，因此网络模型也必须包含
     # 中心云链路；仅构建线性 MEC 网络会导致查询中心云时延时找不到节点。
     network = build_hybrid_rail_network(config=config, topology=topology)
-    functions = build_rl_functions()
-    sfc = build_rl_sfc()
+    functions = build_rl_functions(config)
+    sfc = build_rl_sfc(config)
     slot_seconds = float(config["simulation"]["fast_slot_seconds"])
     input_size_mb_per_request = float(
-        config["integrated_simulation"]["input_size_mb_per_request"]
+        config["rl_scenario"]["sfc"]["input_size_mb_per_request"]
     )
 
     mobility_model = TrainMobilityModel(

@@ -26,6 +26,15 @@ topology:
   # 每个 MEC 的覆盖半径，单位为米
   mec_coverage_radius_m: 1200.0
 
+  # 按 MEC-1、MEC-2……的顺序显式声明故障域。
+  # 扩充 mec_count 时需要同步补充列表，避免代码用下标猜测故障域。
+  mec_fault_domain_ids:
+    - 0
+    - 0
+    - 1
+    - 1
+    - 2
+
   # 是否加入车载边缘节点
   include_onboard: true
 
@@ -64,6 +73,54 @@ serverless:
 
   # 同一函数允许的最大副本数量
   max_replicas: 3
+
+# ============================================================
+# 学习环境使用的 VNF 与 SFC 定义
+# ============================================================
+
+rl_scenario:
+  # 列表顺序会成为状态编码和联合动作中的固定 VNF 顺序。
+  # 扩充或缩减 SFC 时只修改这里，不修改 Python 源码。
+  functions:
+    - function_id: 0
+      name: 数据清洗
+      memory_mb: 256.0
+      cpu_cycles_per_request: 20.0
+      image_size_mb: 80.0
+      warm_exec_time_ms: 15.0
+      cold_start_time_ms: 300.0
+      output_ratio: 0.7
+
+    - function_id: 1
+      name: 特征提取
+      memory_mb: 512.0
+      cpu_cycles_per_request: 40.0
+      image_size_mb: 150.0
+      warm_exec_time_ms: 30.0
+      cold_start_time_ms: 500.0
+      output_ratio: 0.4
+
+    - function_id: 2
+      name: 异常检测
+      memory_mb: 768.0
+      cpu_cycles_per_request: 60.0
+      image_size_mb: 300.0
+      warm_exec_time_ms: 50.0
+      cold_start_time_ms: 800.0
+      output_ratio: 0.1
+
+  sfc:
+    sfc_id: 0
+    name: 高可靠列车设备故障诊断
+    # 这里决定 VNF 的实际执行顺序，必须且只能引用上面声明的 VNF。
+    function_ids:
+      - 0
+      - 1
+      - 2
+    deadline_ms: 1500.0
+    reliability_target: 0.99
+    priority: critical
+    input_size_mb_per_request: 2.0
 
   # ============================================================
 # 容器保留策略对比实验参数
@@ -484,3 +541,43 @@ rl_environment:
     cold_start: 0.15
     sla_violation: 0.40
     reconfiguration: 0.05
+
+# ============================================================
+# DPPO 主算法配置
+# ============================================================
+
+dppo:
+  action:
+    schema_version: joint-sfc-continuous-v1
+    maximum_retention_seconds: 20.0
+    replica_threshold: 0.0
+
+  diffusion:
+    steps: 20
+    fine_tuned_steps: 5
+    noise_schedule: cosine
+    hidden_dims:
+      - 256
+      - 256
+
+  dataset:
+    episodes: 1000
+    seed_start: 40000
+    train_fraction: 0.70
+    validation_fraction: 0.15
+    test_fraction: 0.15
+    output_root: results/dppo/datasets
+
+  training:
+    state_schema_version: dppo-v1-flat
+    gamma: 0.99
+    gae_lambda: 0.95
+    clip_ratio: 0.20
+    denoising_discount: 0.99
+    policy_learning_rate: 0.0003
+    value_learning_rate: 0.0003
+    batch_size: 64
+    update_epochs: 10
+    gradient_clip_norm: 5.0
+    device: cpu
+    output_root: results/dppo/training

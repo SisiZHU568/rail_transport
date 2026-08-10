@@ -133,9 +133,11 @@ git commit -m "refactor: remove retired learning algorithm assets"
 - Modify: `configs/debug.yaml`
 - Modify: `src/config.py`
 - Modify: `src/rl_scenario.py`
+- Modify: `src/topology.py`
 - Modify: `tests/test_config.py`
+- Modify: `tests/test_topology.py`
 
-- [ ] **Step 1: Write failing dimension and config tests**
+- [x] **Step 1: Write failing dimension and config tests**
 
 ```python
 import pytest
@@ -168,7 +170,7 @@ def test_dimensions_follow_configured_scale(
 
 The first expected state is `8*3 + 4*2 + 26 = 58`; the action is `2*(3+4) = 14`.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_scenario_dimensions.py tests/test_config.py
@@ -176,7 +178,7 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: import failure for `src.scenario_dimensions` and missing `rl_scenario.functions`, `rl_scenario.sfc`, and `dppo` configuration.
 
-- [ ] **Step 3: Implement the immutable dimension object and config builders**
+- [x] **Step 3: Implement the immutable dimension object and config builders**
 
 ```python
 from dataclasses import dataclass
@@ -212,7 +214,7 @@ class ScenarioDimensions:
 
 Move every function and SFC field currently constructed in Python into `rl_scenario.functions` and `rl_scenario.sfc`. `build_rl_functions(config)` and `build_rl_sfc(config)` must preserve configured list order and reject duplicate IDs or a mismatched SFC chain.
 
-- [ ] **Step 4: Run dimensions, config, entity, and topology tests**
+- [x] **Step 4: Run dimensions, config, entity, and topology tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_scenario_dimensions.py tests/test_config.py tests/test_entities.py tests/test_topology.py
@@ -220,10 +222,10 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: PASS for 3, 5, and 8 MEC dimension cases.
 
-- [ ] **Step 5: Commit configuration-driven scale**
+- [x] **Step 5: Commit configuration-driven scale**
 
 ```powershell
-git add src/scenario_dimensions.py src/config.py src/rl_scenario.py configs/debug.yaml tests/test_scenario_dimensions.py tests/test_config.py
+git add src/scenario_dimensions.py src/config.py src/rl_scenario.py src/topology.py configs/debug.yaml tests/test_scenario_dimensions.py tests/test_config.py tests/test_topology.py
 git commit -m "feat: derive DPPO dimensions from scenario config"
 ```
 

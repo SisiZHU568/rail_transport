@@ -5,6 +5,8 @@ test_topology.py
 以及 MEC 接入和切换逻辑是否正确。
 """
 
+from copy import deepcopy
+
 import pytest
 
 from src.config import load_config
@@ -151,6 +153,17 @@ def test_cloud_can_be_disabled_without_changing_trackside_route() -> None:
     assert len(topology.compute_nodes) == 5
     assert topology.route_start_m == 0.0
     assert topology.route_end_m == 8000.0
+
+
+def test_mec_fault_domains_come_from_configuration() -> None:
+    """故障域必须显式配置，不能在拓扑代码中按节点下标猜测。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["topology"]["mec_fault_domain_ids"] = [4, 3, 2, 1, 0]
+
+    topology = build_linear_topology(config)
+
+    assert [site.node.fault_domain for site in topology.sites] == [4, 3, 2, 1, 0]
 
 
 def test_cloud_node_must_have_cloud_type() -> None:

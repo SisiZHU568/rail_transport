@@ -408,6 +408,7 @@ def build_linear_topology(
     mec_count = config["topology"]["mec_count"]
     spacing_m = config["topology"]["mec_spacing_m"]
     coverage_radius_m = config["topology"]["mec_coverage_radius_m"]
+    fault_domain_ids = config["topology"]["mec_fault_domain_ids"]
 
     cpu_capacity = config["node_resources"]["mec_cpu_capacity"]
     memory_capacity_mb = config["node_resources"]["mec_memory_mb"]
@@ -431,8 +432,8 @@ def build_linear_topology(
             memory_capacity_mb=memory_capacity_mb,
             reliability=reliability,
 
-            # 当前规定每两个相邻 MEC 属于同一故障域。
-            fault_domain=index // 2,
+            # 故障域由配置显式给出，扩容实验不需要修改本文件。
+            fault_domain=fault_domain_ids[index],
         )
 
         # MEC 在线路上的位置：
