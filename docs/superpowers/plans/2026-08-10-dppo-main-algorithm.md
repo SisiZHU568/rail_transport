@@ -600,14 +600,18 @@ git commit -m "feat: add configuration-driven DPPO state encoder"
 ### Task 7: Let the shared fast executor consume explicit per-function intents
 
 **Files:**
+- Modify: `src/constraint_audit.py`
+- Modify: `src/continuous_retention.py`
+- Modify: `src/fast_optimizer.py`
 - Modify: `src/fast_slot_executor.py`
+- Modify: `src/sfc_deployment_intent.py`
 - Modify: `src/two_timescale_control.py`
 - Modify: `src/two_timescale_simulator.py`
 - Modify: `tests/test_fast_slot_executor.py`
 - Modify: `tests/test_two_timescale_simulator.py`
 - Create: `tests/test_fast_slot_executor_intent.py`
 
-- [ ] **Step 1: Write failing mixed-replica execution test**
+- [x] **Step 1: Write failing mixed-replica execution test**
 
 Create an `SFCDeploymentIntent` whose three functions request `(2,3,2)` replicas on explicit node rankings and independent retention times. Execute one slot and assert the initial candidate map uses those per-function counts, the final audit is returned, and continuous retention determines hot nodes.
 
@@ -645,11 +649,11 @@ def test_executor_uses_per_function_replica_counts() -> None:
     assert result.retained_hot_node_ids_by_function[0] == frozenset({0, 1})
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_fast_slot_executor_intent.py`; expect `FastSlotInput` not accepting `deployment_intent`.
 
-- [ ] **Step 3: Add an explicit intent path without algorithm branching**
+- [x] **Step 3: Add an explicit intent path without algorithm branching**
 
 `FastSlotInput` receives a required `deployment_intent`. Remove planner selection from the learning path. The executor constructs the initial candidate map directly from each `FunctionDeploymentIntent`, applies the retention tracker, audits, invokes the existing optimizer only when needed, and returns raw/projected/final maps. Rule-based simulators must construct the same intent before calling the executor; the executor must not inspect a controller name.
 
@@ -671,13 +675,13 @@ def _candidate_map_from_intent(
     }
 ```
 
-- [ ] **Step 4: Run executor, optimizer, simulator, and reliability tests**
+- [x] **Step 4: Run executor, optimizer, simulator, and reliability tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_fast_slot_executor.py tests/test_fast_slot_executor_intent.py tests/test_fast_optimizer.py tests/test_two_timescale_simulator.py
 ```
 
-- [ ] **Step 5: Commit shared intent execution**
+- [x] **Step 5: Commit shared intent execution**
 
 ```powershell
 git add src/fast_slot_executor.py src/two_timescale_control.py src/two_timescale_simulator.py tests/test_fast_slot_executor.py tests/test_fast_slot_executor_intent.py tests/test_two_timescale_simulator.py

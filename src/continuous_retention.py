@@ -89,8 +89,8 @@ class ContinuousRetentionTracker:
             _validate_nonnegative_integer(node_id, "backup node ID")
             for node_id in backup_node_ids
         )
-        if len(normalized_backup_ids) not in (1, 2):
-            raise ValueError("backup_node_ids must contain one or two nodes.")
+        if len(normalized_backup_ids) not in (0, 1, 2):
+            raise ValueError("backup_node_ids must contain zero, one, or two nodes.")
 
         all_node_ids = (normalized_primary_id,) + normalized_backup_ids
         if len(set(all_node_ids)) != len(all_node_ids):

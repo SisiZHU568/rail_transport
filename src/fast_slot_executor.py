@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 
+from src.continuous_retention import ContinuousRetentionTracker
 from src.constraint_audit import SlotConstraintAuditor
 from src.entities import (
     NodeType,
@@ -19,13 +20,16 @@ from src.runtime_reliability import (
     ReplicaPlannerProtocol,
     SingleReplicaPlanner,
 )
+from src.sfc_deployment_intent import SFCDeploymentIntent
 from src.sfc_execution import execute_sfc_batch
 from src.topology import LinearRailTopology
 from src.two_timescale_control import (
     FastTimescaleDecision,
     FastTimescaleState,
     SlowTimescaleDecision,
+    build_fast_decision_for_hot_nodes,
     build_fast_decision_for_plan,
+    build_rule_based_deployment_intent,
 )
 
 
@@ -63,16 +67,21 @@ class FastSlotInput:
     train_state: TrainState
     request_count: int
     infrastructure_state: InfrastructureState
-    slow_decision: SlowTimescaleDecision
+    slow_decision: SlowTimescaleDecision | None
     previous_candidate_map: (
         dict[int, tuple[int, ...]] | None
     )
+    deployment_intent: SFCDeploymentIntent | None = None
 
     def __post_init__(self) -> None:
         """在闭环入口拒绝没有物理意义的负请求数量。"""
 
         if self.request_count < 0:
             raise ValueError("快时隙请求数量不能小于0。")
+        if (self.slow_decision is None) == (self.deployment_intent is None):
+            raise ValueError(
+                "Exactly one of slow_decision or deployment_intent is required."
+            )
 
 
 @dataclass(frozen=True)
@@ -81,6 +90,8 @@ class FastSlotExecutionResult:
 
     function_replica_node_ids: dict[int, tuple[int, ...]]
     function_hot_node_ids: dict[int, tuple[int, ...]]
+    initial_candidate_map: dict[int, tuple[int, ...]]
+    retained_hot_node_ids_by_function: dict[int, frozenset[int]]
     selected_execution_node_ids: tuple[int, ...]
     initial_audit: SlotConstraintAudit
     final_audit: SlotConstraintAudit
@@ -188,6 +199,13 @@ class FastSlotExecutor:
         )
         self.cost_rates = cost_rates
         self.return_result_to_source = return_result_to_source
+        self.retention_tracker = ContinuousRetentionTracker(
+            slot_seconds=slot_seconds
+        )
+        # 规则基线的旧语义是“每次慢决策重新生成温热模板”。记录最近一次
+        # 规则决策时隙，才能只在新决策到来时清空旧模板，而不影响通用
+        # DPPO 意图跨慢决策延续尚未到期的保留状态。
+        self._last_rule_decision_slot: int | None = None
         self.node_map = {
             node.node_id: node
             for node in topology.compute_nodes
@@ -198,12 +216,178 @@ class FastSlotExecutor:
             else topology.cloud_node.node_id
         )
 
+    def reset(self) -> None:
+        """清空跨时隙保留状态，供新 Episode 开始时调用。"""
+
+        self.retention_tracker.reset()
+        self._last_rule_decision_slot = None
+
+    def build_rule_based_intent(
+        self,
+        *,
+        train_state: TrainState,
+        slow_decision: SlowTimescaleDecision,
+    ) -> SFCDeploymentIntent:
+        """为过渡期规则仿真生成通用意图；``execute`` 本身不再选择规划器。"""
+
+        if self._last_rule_decision_slot != slow_decision.decision_slot:
+            self.retention_tracker.reset()
+            self._last_rule_decision_slot = slow_decision.decision_slot
+
+        if slow_decision.replica_count not in self.replica_planners:
+            raise ValueError("No planner exists for the rule-based replica count.")
+        plan = self.replica_planners[slow_decision.replica_count].plan(
+            sfc=self.sfc,
+            train_state=train_state,
+            topology=self.topology,
+        )
+        candidate_map = {
+            function_id: tuple(node_ids)
+            for function_id, node_ids in plan.function_replica_node_ids.items()
+        }
+        backup_activation_triggered = (
+            slow_decision.retention_policy is RetentionPolicy.PRIMARY_WARM
+            and slow_decision.use_redundancy
+            and train_state.remaining_dwell_time_s <= self.handover_hot_window_s
+        )
+        return build_rule_based_deployment_intent(
+            slow_decision=slow_decision,
+            candidate_map=candidate_map,
+            slot_seconds=self.slot_seconds,
+            backup_activation_triggered=backup_activation_triggered,
+        )
+
+    def _candidate_map_from_intent(
+        self,
+        intent: SFCDeploymentIntent,
+        *,
+        time_slot: int,
+    ) -> dict[int, tuple[int, ...]]:
+        """直接读取逐 VNF 节点意图，不在快层重新选择副本规划器。"""
+
+        intent_function_ids = tuple(
+            function_intent.function_id
+            for function_intent in intent.function_intents
+        )
+        if intent_function_ids != tuple(self.sfc.function_ids):
+            raise ValueError(
+                "Deployment intent function order must match the configured SFC."
+            )
+        if not intent.decision_slot <= time_slot < intent.valid_until_slot:
+            raise ValueError("Deployment intent is not valid for this fast slot.")
+        return {
+            function_intent.function_id: tuple(
+                function_intent.preferred_node_ids[
+                    : function_intent.replica_count
+                ]
+            )
+            for function_intent in intent.function_intents
+        }
+
+    def _retained_hot_nodes(
+        self,
+        *,
+        time_slot: int,
+        operational_node_ids: frozenset[int],
+    ) -> dict[int, frozenset[int]]:
+        """读取决策前的连续保留状态，并立即移除已经故障的节点。"""
+
+        failed_node_ids = set(self.node_map) - set(operational_node_ids)
+        self.retention_tracker.remove_failed_nodes(failed_node_ids)
+        return {
+            function_id: self.retention_tracker.hot_node_ids(
+                function_id,
+                slot=time_slot,
+            )
+            for function_id in self.sfc.function_ids
+        }
+
+    @staticmethod
+    def _retention_role_flags(
+        intent: SFCDeploymentIntent,
+        *,
+        time_slot: int,
+    ) -> dict[int, tuple[bool, ...]]:
+        """标记本次意图中哪些主/备副本需要在当前决策时隙变热。"""
+
+        is_decision_slot = time_slot == intent.decision_slot
+        return {
+            function_intent.function_id: (
+                is_decision_slot
+                and function_intent.primary_retention_seconds > 0.0,
+                *(
+                    is_decision_slot
+                    and function_intent.backup_retention_seconds > 0.0
+                    for _ in function_intent.preferred_node_ids[1:]
+                ),
+            )
+            for function_intent in intent.function_intents
+        }
+
+    @staticmethod
+    def _effective_hot_nodes(
+        *,
+        retained_hot_nodes: dict[int, frozenset[int]],
+        candidate_map: dict[int, tuple[int, ...]],
+        retention_role_flags: dict[int, tuple[bool, ...]],
+        operational_node_ids: frozenset[int],
+    ) -> dict[int, frozenset[int]]:
+        """合并历史保留与当前候选角色，且绝不把故障节点重新标热。"""
+
+        effective_hot_nodes: dict[int, frozenset[int]] = {}
+        for function_id, node_ids in candidate_map.items():
+            flags = retention_role_flags[function_id]
+            if len(flags) != len(node_ids):
+                raise ValueError(
+                    "Retention role flags must match each function's replicas."
+                )
+            current_hot_nodes = {
+                node_id
+                for node_id, should_be_hot in zip(node_ids, flags)
+                if should_be_hot and node_id in operational_node_ids
+            }
+            current_hot_nodes.update(
+                node_id
+                for node_id in retained_hot_nodes[function_id]
+                if node_id in operational_node_ids
+            )
+            effective_hot_nodes[function_id] = frozenset(current_hot_nodes)
+        return effective_hot_nodes
+
+    def _apply_final_intent_retention(
+        self,
+        *,
+        intent: SFCDeploymentIntent,
+        final_candidate_map: dict[int, tuple[int, ...]],
+        time_slot: int,
+    ) -> None:
+        """修复结束后把保留时间绑定到最终副本，避免保留已被迁走的节点。"""
+
+        if time_slot != intent.decision_slot:
+            return
+        intent_map = {
+            function_intent.function_id: function_intent
+            for function_intent in intent.function_intents
+        }
+        for function_id, node_ids in final_candidate_map.items():
+            function_intent = intent_map[function_id]
+            self.retention_tracker.apply_intent(
+                slot=time_slot,
+                function_id=function_id,
+                primary_node_id=node_ids[0],
+                backup_node_ids=tuple(node_ids[1:]),
+                primary_seconds=function_intent.primary_retention_seconds,
+                backup_seconds=function_intent.backup_retention_seconds,
+            )
+
     def _build_candidate_map(
         self,
         slot_input: FastSlotInput,
     ) -> dict[int, tuple[int, ...]]:
         """按慢动作的副本数选择唯一对应的副本规划器。"""
 
+        if slot_input.slow_decision is None:
+            raise ValueError("Legacy planning requires a slow-timescale decision.")
         replica_count = slot_input.slow_decision.replica_count
         if replica_count not in self.replica_planners:
             raise ValueError(
@@ -264,7 +448,7 @@ class FastSlotExecutor:
         self,
         *,
         request_count: int,
-        replica_count: int,
+        replica_count: int | dict[int, int],
         candidate_map: dict[int, tuple[int, ...]],
         decision: FastTimescaleDecision,
     ) -> SlotConstraintAudit:
@@ -363,10 +547,35 @@ class FastSlotExecutor:
         ):
             raise ValueError("基础设施状态与列车状态不属于同一时隙。")
 
-        candidate_map = self._build_candidate_map(slot_input)
         operational_node_ids = self._operational_node_ids(
             slot_input.infrastructure_state
         )
+        if slot_input.deployment_intent is None:
+            candidate_map = self._build_candidate_map(slot_input)
+            expected_replica_counts: int | dict[int, int] = (
+                slot_input.slow_decision.replica_count
+            )
+            retained_hot_sets: dict[int, frozenset[int]] | None = None
+            retention_role_flags: dict[int, tuple[bool, ...]] | None = None
+        else:
+            candidate_map = self._candidate_map_from_intent(
+                slot_input.deployment_intent,
+                time_slot=train_state.time_slot,
+            )
+            expected_replica_counts = {
+                function_id: len(node_ids)
+                for function_id, node_ids in candidate_map.items()
+            }
+            # 先读取历史状态，当前意图只作为候选角色标记参与审计；真正的
+            # 到期时间必须等快层修复结束后再绑定到最终部署节点。
+            retained_hot_sets = self._retained_hot_nodes(
+                time_slot=train_state.time_slot,
+                operational_node_ids=operational_node_ids,
+            )
+            retention_role_flags = self._retention_role_flags(
+                slot_input.deployment_intent,
+                time_slot=train_state.time_slot,
+            )
         fast_state = FastTimescaleState(
             time_slot=train_state.time_slot,
             serving_mec=train_state.serving_mec,
@@ -380,27 +589,50 @@ class FastSlotExecutor:
         )
 
         # PRIMARY_WARM只在临近切换且确实存在备用副本时临时预热。
-        backup_activation_triggered = (
-            slot_input.slow_decision.retention_policy
-            is RetentionPolicy.PRIMARY_WARM
-            and slot_input.slow_decision.use_redundancy
-            and train_state.remaining_dwell_time_s
-            <= self.handover_hot_window_s
-        )
-        initial_decision = build_fast_decision_for_plan(
-            state=fast_state,
-            retention_policy=(
+        if slot_input.deployment_intent is None:
+            if slot_input.slow_decision is None:
+                raise ValueError("Legacy execution requires a slow decision.")
+            backup_activation_triggered = (
                 slot_input.slow_decision.retention_policy
-            ),
-            backup_activation_triggered=(
-                backup_activation_triggered
-            ),
-        )
+                is RetentionPolicy.PRIMARY_WARM
+                and slot_input.slow_decision.use_redundancy
+                and train_state.remaining_dwell_time_s
+                <= self.handover_hot_window_s
+            )
+            initial_decision = build_fast_decision_for_plan(
+                state=fast_state,
+                retention_policy=(
+                    slot_input.slow_decision.retention_policy
+                ),
+                backup_activation_triggered=(
+                    backup_activation_triggered
+                ),
+            )
+            retained_hot_sets = {
+                function_id: frozenset(node_ids)
+                for function_id, node_ids
+                in initial_decision.function_hot_node_ids.items()
+            }
+        else:
+            if retained_hot_sets is None or retention_role_flags is None:
+                raise RuntimeError("Explicit retention state was not initialized.")
+            effective_hot_sets = self._effective_hot_nodes(
+                retained_hot_nodes=retained_hot_sets,
+                candidate_map=candidate_map,
+                retention_role_flags=retention_role_flags,
+                operational_node_ids=operational_node_ids,
+            )
+            initial_decision = build_fast_decision_for_hot_nodes(
+                state=fast_state,
+                function_hot_node_ids={
+                    function_id: tuple(sorted(node_ids))
+                    for function_id, node_ids in effective_hot_sets.items()
+                },
+                backup_activation_triggered=False,
+            )
         initial_audit = self._audit(
             request_count=slot_input.request_count,
-            replica_count=(
-                slot_input.slow_decision.replica_count
-            ),
+            replica_count=expected_replica_counts,
             candidate_map=candidate_map,
             decision=initial_decision,
         )
@@ -409,6 +641,29 @@ class FastSlotExecutor:
             slow_decision=slot_input.slow_decision,
             initial_decision=initial_decision,
             initial_audit=initial_audit,
+            expected_replica_counts=(
+                None
+                if slot_input.deployment_intent is None
+                else expected_replica_counts
+            ),
+            allow_cloud=(
+                None
+                if slot_input.deployment_intent is None
+                else True
+            ),
+            retained_hot_node_ids=(
+                None
+                if slot_input.deployment_intent is None
+                else {
+                    function_id: tuple(sorted(node_ids))
+                    for function_id, node_ids in retained_hot_sets.items()
+                }
+            ),
+            retention_role_flags=(
+                None
+                if slot_input.deployment_intent is None
+                else retention_role_flags
+            ),
         )
 
         # 后续执行、SLA、资源和成本只能读取优化器给出的最终方案。
@@ -425,6 +680,22 @@ class FastSlotExecutor:
                 and final_decision.request_success is not True
             )
         )
+
+        # 只有最终方案可执行时才写入跨时隙状态。否则故障或不可行的部署
+        # 不能污染后续时隙的温热记录。
+        if (
+            slot_input.deployment_intent is not None
+            and not constraint_rejected
+        ):
+            self._apply_final_intent_retention(
+                intent=slot_input.deployment_intent,
+                final_candidate_map=final_candidate_map,
+                time_slot=train_state.time_slot,
+            )
+            retained_hot_sets = self._retained_hot_nodes(
+                time_slot=train_state.time_slot,
+                operational_node_ids=operational_node_ids,
+            )
 
         end_to_end_delay_ms: float | None = None
         deadline_met: bool | None = None
@@ -512,6 +783,11 @@ class FastSlotExecutor:
             function_hot_node_ids=dict(
                 final_decision.function_hot_node_ids
             ),
+            initial_candidate_map=dict(candidate_map),
+            retained_hot_node_ids_by_function={
+                function_id: frozenset(node_ids)
+                for function_id, node_ids in retained_hot_sets.items()
+            },
             selected_execution_node_ids=(
                 final_decision.selected_execution_node_ids
             ),

@@ -44,9 +44,9 @@ class FunctionDeploymentIntent:
         if (
             isinstance(self.replica_count, bool)
             or not isinstance(self.replica_count, int)
-            or self.replica_count not in (2, 3)
+            or self.replica_count not in (1, 2, 3)
         ):
-            raise ValueError("replica_count must be either 2 or 3.")
+            raise ValueError("replica_count must be 1, 2, or 3.")
         if len(self.preferred_node_ids) != self.replica_count:
             raise ValueError(
                 "preferred_node_ids length must match replica_count."

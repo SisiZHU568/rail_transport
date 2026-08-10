@@ -34,7 +34,12 @@ from src.topology import LinearRailTopology, TracksideSite
 from src.two_timescale_control import SlowTimescaleDecision
 
 
-def build_executor(*, unrepairable: bool) -> FastSlotExecutor:
+def build_executor(
+    *,
+    unrepairable: bool,
+    function_ids: tuple[int, ...] = (0, 1),
+    node_count: int = 3,
+) -> FastSlotExecutor:
     """构造两函数、三轨旁节点的最小可核对场景。"""
 
     topology = LinearRailTopology(
@@ -52,7 +57,7 @@ def build_executor(*, unrepairable: bool) -> FastSlotExecutor:
                 position_m=float(node_id * 1000),
                 coverage_radius_m=1200.0,
             )
-            for node_id in range(3)
+            for node_id in range(node_count)
         ]
     )
     functions = [
@@ -69,12 +74,12 @@ def build_executor(*, unrepairable: bool) -> FastSlotExecutor:
             cold_start_time_ms=100.0,
             output_ratio=1.0,
         )
-        for function_id in (0, 1)
+        for function_id in function_ids
     ]
     sfc = SFCType(
         sfc_id=0,
         name="共享执行器测试SFC",
-        function_ids=[0, 1],
+        function_ids=list(function_ids),
         deadline_ms=500.0,
         reliability_target=0.90,
         priority=ServicePriority.CRITICAL,
@@ -87,13 +92,13 @@ def build_executor(*, unrepairable: bool) -> FastSlotExecutor:
             topology=topology,
             fault_domain_availability={
                 node_id: 0.999
-                for node_id in range(3)
+                for node_id in range(node_count)
             },
             minimum_distinct_fault_domains=2,
         ),
     )
     network = LinearMECNetwork(
-        node_ids=[0, 1, 2],
+        node_ids=list(range(node_count)),
         adjacent_bandwidth_mbps=100.0,
         propagation_delay_per_hop_ms=1.0,
         edge_data_cost_per_mb_hop=0.01,
@@ -156,7 +161,7 @@ def build_executor(*, unrepairable: bool) -> FastSlotExecutor:
     )
 
 
-def build_slot_input() -> FastSlotInput:
+def build_slot_input(*, node_count: int = 3) -> FastSlotInput:
     """生成所有轨旁节点都正常、包含一个请求的快时隙输入。"""
 
     return FastSlotInput(
@@ -171,8 +176,8 @@ def build_slot_input() -> FastSlotInput:
         request_count=1,
         infrastructure_state=InfrastructureState(
             time_slot=0,
-            domain_up={0: True, 1: True, 2: True},
-            node_local_up={0: True, 1: True, 2: True},
+            domain_up={node_id: True for node_id in range(node_count)},
+            node_local_up={node_id: True for node_id in range(node_count)},
         ),
         slow_decision=SlowTimescaleDecision(
             decision_slot=0,

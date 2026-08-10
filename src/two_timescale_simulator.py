@@ -359,6 +359,7 @@ class TwoTimescaleRuntimeSimulator:
 
         self.controller.reset()
         self.failure_process.reset()
+        self.fast_slot_executor.reset()
 
         train_state = self.mobility_model.reset()
 
@@ -447,6 +448,12 @@ class TwoTimescaleRuntimeSimulator:
                     train_state.time_slot
                 )
             )
+            deployment_intent = (
+                self.fast_slot_executor.build_rule_based_intent(
+                    train_state=train_state,
+                    slow_decision=slow_decision,
+                )
+            )
             # 规则仿真器不再自行构造快层决定。这个调用是每个快时隙
             # 唯一的规划、审计、修复、执行和成本数据来源。
             fast_result = self.fast_slot_executor.execute(
@@ -456,10 +463,11 @@ class TwoTimescaleRuntimeSimulator:
                     infrastructure_state=(
                         infrastructure_state
                     ),
-                    slow_decision=slow_decision,
+                    slow_decision=None,
                     previous_candidate_map=(
                         previous_candidate_map
                     ),
+                    deployment_intent=deployment_intent,
                 )
             )
             candidate_map = dict(

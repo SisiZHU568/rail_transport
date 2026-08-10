@@ -277,6 +277,16 @@ class SpyFastSlotExecutor:
 
         return len(self.inputs)
 
+    def reset(self) -> None:
+        """把 Episode 重置继续委托给真实执行器。"""
+
+        self.delegate.reset()
+
+    def build_rule_based_intent(self, **kwargs: object):
+        """规则意图仍由真实执行器的过渡期工厂生成。"""
+
+        return self.delegate.build_rule_based_intent(**kwargs)
+
     def execute(
         self,
         slot_input: FastSlotInput,
@@ -442,6 +452,12 @@ def test_simulator_delegates_every_slot_to_shared_executor() -> None:
 
     assert isinstance(spy_executor, SpyFastSlotExecutor)
     assert spy_executor.call_count == len(result.records)
+    assert all(
+        slot_input.slow_decision is None
+        and slot_input.deployment_intent is not None
+        and slot_input.deployment_intent.source_algorithm == "rule_based"
+        for slot_input in spy_executor.inputs
+    )
     assert result.records[0].function_replica_node_ids == (
         spy_executor.results[0].function_replica_node_ids
     )

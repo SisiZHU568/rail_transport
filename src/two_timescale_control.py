@@ -30,6 +30,10 @@ from src.rl_agent_action_space import (
     CloudPolicy,
     RetentionPolicy,
 )
+from src.sfc_deployment_intent import (
+    FunctionDeploymentIntent,
+    SFCDeploymentIntent,
+)
 from src.topology import LinearRailTopology
 
 
@@ -200,6 +204,63 @@ class SlowTimescaleDecision:
         return self.replica_count > 1
 
 
+def build_rule_based_deployment_intent(
+    *,
+    slow_decision: SlowTimescaleDecision,
+    candidate_map: dict[int, tuple[int, ...]],
+    slot_seconds: float,
+    backup_activation_triggered: bool,
+) -> SFCDeploymentIntent:
+    """把规则控制器的旧策略结果适配为共享逐 VNF 部署意图。
+
+    此函数只服务于仍保留的规则实验，不改变 DPPO 的连续动作定义。旧决策的
+    ``valid_until_slot`` 是闭区间，而通用部署意图使用右开区间，因此加一。
+    """
+
+    if slot_seconds <= 0:
+        raise ValueError("slot_seconds must be positive.")
+    if not candidate_map:
+        raise ValueError("candidate_map cannot be empty.")
+    if any(
+        len(node_ids) != slow_decision.replica_count
+        for node_ids in candidate_map.values()
+    ):
+        raise ValueError(
+            "Rule-based candidate counts must match the slow decision."
+        )
+
+    exclusive_valid_until = slow_decision.valid_until_slot + 1
+    retention_seconds = (
+        exclusive_valid_until - slow_decision.decision_slot
+    ) * float(slot_seconds)
+    if slow_decision.retention_policy is RetentionPolicy.ON_DEMAND:
+        primary_seconds = 0.0
+        backup_seconds = 0.0
+    elif slow_decision.retention_policy is RetentionPolicy.ALL_WARM:
+        primary_seconds = retention_seconds
+        backup_seconds = retention_seconds
+    else:
+        primary_seconds = retention_seconds
+        backup_seconds = retention_seconds if backup_activation_triggered else 0.0
+
+    function_intents = tuple(
+        FunctionDeploymentIntent(
+            function_id=function_id,
+            preferred_node_ids=tuple(node_ids),
+            replica_count=len(node_ids),
+            primary_retention_seconds=primary_seconds,
+            backup_retention_seconds=backup_seconds,
+        )
+        for function_id, node_ids in candidate_map.items()
+    )
+    return SFCDeploymentIntent(
+        decision_slot=slow_decision.decision_slot,
+        valid_until_slot=exclusive_valid_until,
+        function_intents=function_intents,
+        source_algorithm="rule_based",
+    )
+
+
 @dataclass(frozen=True)
 class FastTimescaleState:
     """
@@ -346,6 +407,81 @@ class FastTimescaleDecision:
     unavailable_function_ids: tuple[int, ...]
 
     request_success: bool | None
+
+
+def build_fast_decision_for_hot_nodes(
+    state: FastTimescaleState,
+    function_hot_node_ids: dict[int, tuple[int, ...]],
+    *,
+    previously_hot_node_ids: dict[int, tuple[int, ...]] | None = None,
+    backup_activation_triggered: bool = False,
+) -> FastTimescaleDecision:
+    """根据显式温热节点生成快层执行路径，不读取任何学习算法动作类型。
+
+    候选元组第一项仍是主副本。若主副本故障，则按照部署意图给出的后续
+    节点顺序接管；是否冷启动只取决于执行前已知的温热节点集合。
+    """
+
+    if set(function_hot_node_ids) != set(state.function_ids):
+        raise ValueError("Hot-node mapping must cover the complete SFC.")
+    normalized_hot_nodes: dict[int, tuple[int, ...]] = {}
+    for function_id in state.function_ids:
+        node_ids = tuple(function_hot_node_ids[function_id])
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError(f"Function {function_id} has duplicate hot nodes.")
+        normalized_hot_nodes[function_id] = node_ids
+
+    selected_execution_node_ids: list[int] = []
+    failover_function_ids: list[int] = []
+    cold_start_function_ids: list[int] = []
+    unavailable_function_ids: list[int] = []
+
+    for function_id in state.function_ids:
+        candidate_nodes = state.candidate_node_ids[function_id]
+        primary_node_id = candidate_nodes[0]
+        if state.request_count == 0:
+            continue
+
+        operational_candidates = [
+            node_id
+            for node_id in candidate_nodes
+            if node_id in state.operational_node_ids
+        ]
+        if not operational_candidates:
+            unavailable_function_ids.append(function_id)
+            continue
+
+        selected_node_id = operational_candidates[0]
+        selected_execution_node_ids.append(selected_node_id)
+        if selected_node_id != primary_node_id:
+            failover_function_ids.append(function_id)
+
+        known_hot_nodes = (
+            normalized_hot_nodes[function_id]
+            if previously_hot_node_ids is None
+            else previously_hot_node_ids.get(function_id, ())
+        )
+        if selected_node_id not in known_hot_nodes:
+            cold_start_function_ids.append(function_id)
+
+    if state.request_count == 0:
+        request_success: bool | None = None
+    elif unavailable_function_ids:
+        request_success = False
+        # 任一 VNF 无可用副本时，整条 SFC 都不能执行部分路径。
+        selected_execution_node_ids = []
+    else:
+        request_success = True
+
+    return FastTimescaleDecision(
+        function_hot_node_ids=normalized_hot_nodes,
+        selected_execution_node_ids=tuple(selected_execution_node_ids),
+        backup_activation_triggered=backup_activation_triggered,
+        failover_function_ids=tuple(failover_function_ids),
+        cold_start_function_ids=tuple(cold_start_function_ids),
+        unavailable_function_ids=tuple(unavailable_function_ids),
+        request_success=request_success,
+    )
 
 
 def build_fast_decision_for_plan(

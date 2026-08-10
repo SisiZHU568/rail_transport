@@ -1,5 +1,7 @@
 """快时隙资源、副本计划和可靠性硬约束审计。"""
 
+from collections.abc import Mapping
+
 from src.entities import (
     ServerlessFunction,
     SFCType,
@@ -128,7 +130,7 @@ class SlotConstraintAuditor:
     def audit(
         self,
         request_count: int,
-        expected_replica_count: int,
+        expected_replica_count: int | Mapping[int, int],
         candidate_map: dict[int, tuple[int, ...]],
         selected_execution_node_ids: tuple[int, ...],
         request_success: bool | None,
@@ -137,10 +139,34 @@ class SlotConstraintAuditor:
     ) -> SlotConstraintAudit:
         """返回本时隙的完整硬约束审计结果。"""
 
-        if expected_replica_count <= 0:
-            raise ValueError("期望副本数量必须大于0。")
-
         required_ids = set(self.sfc.function_ids)
+        if isinstance(expected_replica_count, Mapping):
+            expected_counts = dict(expected_replica_count)
+            if set(expected_counts) != required_ids:
+                raise ValueError(
+                    "Per-function replica counts must cover the complete SFC."
+                )
+            if any(
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or count <= 0
+                for count in expected_counts.values()
+            ):
+                raise ValueError(
+                    "Every per-function replica count must be a positive integer."
+                )
+        else:
+            if (
+                isinstance(expected_replica_count, bool)
+                or not isinstance(expected_replica_count, int)
+                or expected_replica_count <= 0
+            ):
+                raise ValueError("期望副本数量必须是大于0的整数。")
+            # 兼容 Task 8 之前仍使用统一副本数的旧环境。
+            expected_counts = {
+                function_id: expected_replica_count
+                for function_id in self.sfc.function_ids
+            }
         supplied_ids = set(candidate_map)
         missing_ids = tuple(sorted(required_ids - supplied_ids))
         extra_ids = tuple(sorted(supplied_ids - required_ids))
@@ -162,12 +188,13 @@ class SlotConstraintAuditor:
             node_ids = candidate_map.get(function_id, ())
 
             # 快层只能移动副本，不能改变慢层许可的副本数量。
-            if len(node_ids) != expected_replica_count:
+            function_expected_count = expected_counts[function_id]
+            if len(node_ids) != function_expected_count:
                 count_violation_ids.append(function_id)
                 replica_plan_valid = False
                 reasons.append(
                     f"函数{function_id}的副本数量{len(node_ids)}"
-                    f"不等于慢层要求{expected_replica_count}。"
+                    f"不等于慢层要求{function_expected_count}。"
                 )
 
             if len(node_ids) != len(set(node_ids)):

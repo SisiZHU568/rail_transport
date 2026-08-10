@@ -1,5 +1,6 @@
 """慢层模板约束下的确定性快层可行性修复。"""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from itertools import permutations, product
 
@@ -17,6 +18,7 @@ from src.two_timescale_control import (
     FastTimescaleDecision,
     FastTimescaleState,
     SlowTimescaleDecision,
+    build_fast_decision_for_hot_nodes,
     build_fast_decision_for_plan,
 )
 
@@ -112,6 +114,18 @@ class FastFeasibilityOptimizer:
             node.node_id: node
             for node in topology.compute_nodes
         }
+        if network is None:
+            self.network_node_ids = set(self.node_map)
+        elif hasattr(network, "node_ids"):
+            self.network_node_ids = set(network.node_ids)
+        elif hasattr(network, "edge_network") and hasattr(network, "cloud_node_id"):
+            self.network_node_ids = {
+                *network.edge_network.node_ids,
+                network.cloud_node_id,
+            }
+        else:
+            # 自定义协议实现若不公开节点表，就沿用拓扑并由其传输方法最终校验。
+            self.network_node_ids = set(self.node_map)
 
     def _cold_activated_pairs(
         self,
@@ -376,22 +390,75 @@ class FastFeasibilityOptimizer:
     def optimize(
         self,
         state: FastTimescaleState,
-        slow_decision: SlowTimescaleDecision,
+        slow_decision: SlowTimescaleDecision | None,
         initial_decision: FastTimescaleDecision,
         initial_audit: SlotConstraintAudit,
+        *,
+        expected_replica_counts: Mapping[int, int] | None = None,
+        allow_cloud: bool | None = None,
+        retained_hot_node_ids: dict[int, tuple[int, ...]] | None = None,
+        retention_role_flags: Mapping[int, tuple[bool, ...]] | None = None,
     ) -> FastOptimizationResult:
         """在慢层副本数、保留策略和云权限不变时修复部署。"""
 
-        if slow_decision.replica_count <= 0:
+        if expected_replica_counts is None:
+            if slow_decision is None:
+                raise ValueError(
+                    "Explicit execution requires per-function replica counts."
+                )
+            required_counts = {
+                function_id: slow_decision.replica_count
+                for function_id in state.function_ids
+            }
+        else:
+            required_counts = dict(expected_replica_counts)
+            if set(required_counts) != set(state.function_ids):
+                raise ValueError(
+                    "Per-function replica counts must cover the complete SFC."
+                )
+
+        if retention_role_flags is not None:
+            if retained_hot_node_ids is None:
+                raise ValueError(
+                    "Retention role flags require explicit retained hot nodes."
+                )
+            if set(retention_role_flags) != set(state.function_ids):
+                raise ValueError(
+                    "Retention role flags must cover the complete SFC."
+                )
+            for function_id in state.function_ids:
+                if len(retention_role_flags[function_id]) != required_counts[
+                    function_id
+                ]:
+                    raise ValueError(
+                        "Retention role flags must match each function's replicas."
+                    )
+
+        if any(
+            isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            for count in required_counts.values()
+        ):
             raise ValueError("慢层副本数量必须大于0。")
+
+        if allow_cloud is None:
+            if slow_decision is None:
+                raise ValueError("Explicit execution must define cloud eligibility.")
+            cloud_is_allowed = (
+                slow_decision.cloud_policy is CloudPolicy.CLOUD_ALLOWED
+            )
+        else:
+            cloud_is_allowed = bool(allow_cloud)
 
         allowed_node_ids = set(self.edge_node_ids)
         if (
-            slow_decision.cloud_policy
-            is CloudPolicy.CLOUD_ALLOWED
+            cloud_is_allowed
             and self.cloud_node_id is not None
         ):
             allowed_node_ids.add(self.cloud_node_id)
+        # 修复器不能选择网络模型无法路由的计算节点。
+        allowed_node_ids.intersection_update(self.network_node_ids)
         initial_plan_policy_compliant = all(
             node_id in allowed_node_ids
             for function_id in state.function_ids
@@ -434,14 +501,24 @@ class FastFeasibilityOptimizer:
                 evaluated_candidate_count=0,
             )
 
-        required_count = slow_decision.replica_count
+        maximum_required_count = max(required_counts.values())
         minimum_domains = (
             self.auditor.reliability_model
             .minimum_distinct_fault_domains
         )
 
         # 快层只能搬迁副本，不能突破慢层给出的副本数量上限。
-        if required_count < minimum_domains:
+        insufficient_domain_functions = tuple(
+            function_id
+            for function_id in state.function_ids
+            if required_counts[function_id] < minimum_domains
+        )
+        if insufficient_domain_functions:
+            required_count = min(
+                required_counts[function_id]
+                for function_id in insufficient_domain_functions
+            )
+            # 旧错误文本仍使用一个数值，这里取最小值仅用于兼容诊断展示。
             return self._failure_result(
                 state=state,
                 initial_decision=initial_decision,
@@ -472,7 +549,8 @@ class FastFeasibilityOptimizer:
                 self.cloud_node_id,
             )
 
-        if len(operational_ids) < required_count:
+        required_count = maximum_required_count
+        if len(operational_ids) < maximum_required_count:
             return self._failure_result(
                 state=state,
                 initial_decision=initial_decision,
@@ -487,10 +565,13 @@ class FastFeasibilityOptimizer:
         # 排列而非组合：元组首项是主节点，因此(0,1)和(1,0)
         # 对执行路径、接管和冷启动具有不同含义。
         per_function_options = tuple(
-            permutations(
-                operational_ids,
-                required_count,
+            tuple(
+                permutations(
+                    operational_ids,
+                    required_counts[function_id],
+                )
             )
+            for function_id in state.function_ids
         )
         ranked_candidates: list[
             tuple[
@@ -504,10 +585,7 @@ class FastFeasibilityOptimizer:
             ]
         ] = []
 
-        for node_tuples in product(
-            per_function_options,
-            repeat=len(state.function_ids),
-        ):
+        for node_tuples in product(*per_function_options):
             candidate_map = {
                 function_id: tuple(node_ids)
                 for function_id, node_ids in zip(
@@ -524,19 +602,60 @@ class FastFeasibilityOptimizer:
                 state,
                 candidate_node_ids=candidate_map,
             )
-            decision = build_fast_decision_for_plan(
-                state=repaired_state,
-                retention_policy=(
-                    slow_decision.retention_policy
-                ),
-                backup_activation_triggered=(
-                    initial_decision
-                    .backup_activation_triggered
-                ),
-                previously_hot_node_ids=(
-                    initial_decision.function_hot_node_ids
-                ),
-            )
+            if retained_hot_node_ids is None:
+                if slow_decision is None:
+                    raise ValueError(
+                        "Legacy repair requires a slow-timescale decision."
+                    )
+                decision = build_fast_decision_for_plan(
+                    state=repaired_state,
+                    retention_policy=slow_decision.retention_policy,
+                    backup_activation_triggered=(
+                        initial_decision.backup_activation_triggered
+                    ),
+                    previously_hot_node_ids=(
+                        initial_decision.function_hot_node_ids
+                    ),
+                )
+            else:
+                # 历史保留节点不能随修复迁移；但“本次动作要求变热”的
+                # 主/备角色必须绑定到当前候选方案，否则修复器会错误地把
+                # 已迁出的节点计入内存，并把新节点一律当作冷副本。
+                candidate_hot_node_ids = {
+                    function_id: tuple(
+                        sorted(
+                            {
+                                node_id
+                                for node_id in retained_hot_node_ids[
+                                    function_id
+                                ]
+                                if node_id in state.operational_node_ids
+                            }
+                            | {
+                                node_id
+                                for node_id, should_be_hot in zip(
+                                    candidate_map[function_id],
+                                    (
+                                        retention_role_flags[function_id]
+                                        if retention_role_flags is not None
+                                        else ()
+                                    ),
+                                )
+                                if should_be_hot
+                                and node_id in state.operational_node_ids
+                            }
+                        )
+                    )
+                    for function_id in state.function_ids
+                }
+                decision = build_fast_decision_for_hot_nodes(
+                    state=repaired_state,
+                    function_hot_node_ids=candidate_hot_node_ids,
+                    previously_hot_node_ids=(
+                        initial_decision.function_hot_node_ids
+                    ),
+                    backup_activation_triggered=False,
+                )
             decision = (
                 self._preserve_initial_failure_failovers(
                     state=state,
@@ -581,7 +700,7 @@ class FastFeasibilityOptimizer:
 
             audit = self.auditor.audit(
                 request_count=state.request_count,
-                expected_replica_count=required_count,
+                expected_replica_count=required_counts,
                 candidate_map=candidate_map,
                 selected_execution_node_ids=(
                     decision.selected_execution_node_ids
