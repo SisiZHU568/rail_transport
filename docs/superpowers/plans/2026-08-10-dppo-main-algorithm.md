@@ -432,7 +432,7 @@ git commit -m "feat: project relaxed DPPO actions to SFC intents"
 - Create: `src/continuous_retention.py`
 - Create: `tests/test_continuous_retention.py`
 
-- [ ] **Step 1: Write failing expiry and refresh tests**
+- [x] **Step 1: Write failing expiry and refresh tests**
 
 ```python
 from src.continuous_retention import ContinuousRetentionTracker
@@ -448,11 +448,11 @@ def test_primary_and_backup_expire_at_independent_slots() -> None:
     assert tracker.hot_node_ids(0, slot=7) == frozenset()
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_continuous_retention.py`; expect missing class failure.
 
-- [ ] **Step 3: Implement expiry tracker**
+- [x] **Step 3: Implement expiry tracker**
 
 Store expiry as `dict[(function_id,node_id), int]`. Convert positive seconds with `ceil(seconds/slot_seconds)`, expire when `slot >= expiry_slot`, refresh selected replicas with `max(old_expiry,new_expiry)`, remove failed nodes immediately, and clear all state on reset. Reject negative, non-finite retention and non-positive slot length.
 
@@ -492,13 +492,13 @@ class ContinuousRetentionTracker:
         self._expiry_slots.clear()
 ```
 
-- [ ] **Step 4: Run retention and cold-start tests**
+- [x] **Step 4: Run retention and cold-start tests**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_continuous_retention.py tests/test_cold_start.py tests/test_ttl_retention.py
 ```
 
-- [ ] **Step 5: Commit retention**
+- [x] **Step 5: Commit retention**
 
 ```powershell
 git add src/continuous_retention.py tests/test_continuous_retention.py
