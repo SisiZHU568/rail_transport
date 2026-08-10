@@ -94,8 +94,10 @@ def build_rl_sfc(config: dict[str, Any]) -> SFCType:
         _require_nonnegative_integer(function_id, "SFC VNF ID")
         for function_id in raw_chain
     )
-    if len(set(chain)) != len(chain) or set(chain) != set(configured_ids):
-        raise ValueError("SFC 必须且只能引用配置中声明的全部 VNF。")
+    if chain != configured_ids:
+        raise ValueError(
+            "SFC VNF 顺序必须与 rl_scenario.functions 的配置顺序完全一致。"
+        )
 
     try:
         priority = ServicePriority(str(sfc_config["priority"]).lower())

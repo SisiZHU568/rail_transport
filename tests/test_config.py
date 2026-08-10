@@ -52,3 +52,13 @@ def test_validate_config_matches_fault_domains_to_mec_count() -> None:
 
     with pytest.raises(ValueError, match="mec_fault_domain_ids.*mec_count"):
         validate_config(config)
+
+
+def test_validate_config_rejects_unencodable_replica_threshold() -> None:
+    """阈值为 -1 时没有更小的合法动作值可用于表示 2 副本。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["action"]["replica_threshold"] = -1.0
+
+    with pytest.raises(ValueError, match=r"replica_threshold.*\(-1, 1\]"):
+        validate_config(config)

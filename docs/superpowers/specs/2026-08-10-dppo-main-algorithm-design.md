@@ -169,6 +169,10 @@ action_dim = F * N + F + 2 * F = F * N + 3 * F
 retention_seconds = (x + 1) / 2 * maximum_retention_seconds
 ```
 
+最后 `2 * F` 个分量按配置中的 VNF 顺序排列；每个 VNF 固定先放
+主副本保留值，再放备用副本保留值，即
+`[vnf_0_primary, vnf_0_backup, vnf_1_primary, vnf_1_backup, ...]`。
+
 同一 VNF 的所有备用副本共享备用保留时间。执行器再按快时隙长度向上
 取整为保留时隙数，保证正的保留时间至少覆盖一个快时隙。
 

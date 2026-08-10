@@ -86,9 +86,9 @@ def validate_config(config: dict[str, Any]) -> None:
         isinstance(replica_threshold, bool)
         or not isinstance(replica_threshold, (int, float))
         or not math.isfinite(float(replica_threshold))
-        or not -1.0 <= float(replica_threshold) <= 1.0
+        or not -1.0 < float(replica_threshold) <= 1.0
     ):
-        raise ValueError("replica_threshold 必须位于 [-1, 1]。")
+        raise ValueError("replica_threshold 必须位于 (-1, 1]。")
 
     diffusion = _require_mapping(dppo, "diffusion")
     diffusion_steps = _require_positive_integer(diffusion, "steps")

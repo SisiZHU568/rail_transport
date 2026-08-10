@@ -236,8 +236,13 @@ git commit -m "feat: derive DPPO dimensions from scenario config"
 **Files:**
 - Create: `src/dppo_action_space.py`
 - Create: `tests/test_dppo_action_space.py`
+- Modify: `src/config.py`
+- Modify: `src/rl_scenario.py`
+- Modify: `tests/test_config.py`
+- Modify: `tests/test_scenario_dimensions.py`
+- Modify: `docs/superpowers/specs/2026-08-10-dppo-main-algorithm-design.md`
 
-- [ ] **Step 1: Write failing shape, threshold, ranking, and retention tests**
+- [x] **Step 1: Write failing shape, threshold, ranking, and retention tests**
 
 ```python
 import numpy as np
@@ -258,7 +263,7 @@ def test_decode_default_joint_action() -> None:
     assert decoded.function_actions[0].backup_retention_seconds == 10.0
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_action_space.py
@@ -266,7 +271,7 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: missing module failure.
 
-- [ ] **Step 3: Implement dynamic slices and deterministic decoding**
+- [x] **Step 3: Implement dynamic slices and deterministic decoding**
 
 Define frozen `DecodedFunctionAction` and `DecodedDPPOAction`. In `DPPOActionSpace.decode`, reshape the first `F*N` values to `(F,N)`, read the next `F` replica scores and final `2F` retention values. Use stable `sorted(node_ids, key=lambda node_id: (-score, node_id))`, threshold `>= replica_threshold` for three replicas, and `(x+1)/2*maximum_retention_seconds` for retention. Reject non-finite values and wrong shapes; clip only finite values to `[-1,1]`.
 
@@ -287,7 +292,7 @@ class DecodedDPPOAction:
     function_actions: tuple[DecodedFunctionAction, ...]
 ```
 
-- [ ] **Step 4: Run action tests at multiple scales**
+- [x] **Step 4: Run action tests at multiple scales**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_action_space.py tests/test_scenario_dimensions.py
@@ -295,10 +300,10 @@ $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pyt
 
 Expected: PASS and no fixed `18`, `21`, `27`, or `36` action slices in source.
 
-- [ ] **Step 5: Commit action space**
+- [x] **Step 5: Commit action space**
 
 ```powershell
-git add src/dppo_action_space.py tests/test_dppo_action_space.py
+git add src/dppo_action_space.py src/config.py src/rl_scenario.py tests/test_dppo_action_space.py tests/test_config.py tests/test_scenario_dimensions.py docs/superpowers/specs/2026-08-10-dppo-main-algorithm-design.md docs/superpowers/plans/2026-08-10-dppo-main-algorithm.md
 git commit -m "feat: add configuration-driven DPPO action space"
 ```
 

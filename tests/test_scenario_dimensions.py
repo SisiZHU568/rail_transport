@@ -119,3 +119,13 @@ def test_config_builders_reject_mismatched_sfc_chain() -> None:
 
     with pytest.raises(ValueError, match="SFC.*VNF"):
         build_rl_sfc(config)
+
+
+def test_config_builders_reject_sfc_order_different_from_action_order() -> None:
+    """状态、动作和 SFC 执行必须对同一 VNF 顺序达成一致。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["rl_scenario"]["sfc"]["function_ids"] = [1, 0, 2]
+
+    with pytest.raises(ValueError, match="SFC.*顺序"):
+        build_rl_sfc(config)
