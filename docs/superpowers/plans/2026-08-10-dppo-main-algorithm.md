@@ -964,7 +964,7 @@ git commit -m "feat: generate versioned DPPO expert datasets"
 - Create: `src/dppo_diffusion.py`
 - Create: `tests/test_dppo_diffusion.py`
 
-- [ ] **Step 1: Write failing diffusion tests**
+- [x] **Step 1: Write failing diffusion tests**
 
 Assert cosine betas are finite in `(0,1)`, `q_sample` preserves `(batch,action_dim)`, conditional MLP predicts the same shape, noise loss is finite, seeded reverse sampling is reproducible, and every reverse Gaussian log probability is finite.
 
@@ -980,11 +980,11 @@ def test_seeded_denoising_chain_is_reproducible() -> None:
     assert torch.isfinite(first.log_probabilities).all()
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_diffusion.py`; expect missing module.
 
-- [ ] **Step 3: Implement schedule and conditional MLP**
+- [x] **Step 3: Implement schedule and conditional MLP**
 
 Implement `CosineNoiseSchedule`, sinusoidal timestep embedding, `ConditionalDiffusionMLP`, `diffusion_noise_loss`, and `sample_denoising_chain`. Derive all linear sizes from `state_dim`, `action_dim`, and configured hidden dimensions. Return a frozen `DenoisingSample` containing all `a_k`, means, standard deviations, and log probabilities needed by DPPO.
 
@@ -1013,13 +1013,13 @@ def diffusion_noise_loss(
     return torch.nn.functional.mse_loss(predicted_noise, noise)
 ```
 
-- [ ] **Step 4: Run diffusion tests on CPU**
+- [x] **Step 4: Run diffusion tests on CPU**
 
 ```powershell
 $env:PYTHONUTF8='1'; $env:PYTHONPATH='.'; D:\Anaconda3\python.exe -X utf8 -m pytest -q -p no:cacheprovider tests/test_dppo_diffusion.py
 ```
 
-- [ ] **Step 5: Commit diffusion actor**
+- [x] **Step 5: Commit diffusion actor**
 
 ```powershell
 git add src/dppo_diffusion.py tests/test_dppo_diffusion.py
