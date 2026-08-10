@@ -25,12 +25,17 @@ def _require_mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
     return value
 
 
-def _require_positive_integer(parent: dict[str, Any], key: str) -> int:
+def _require_positive_integer(
+    parent: dict[str, Any],
+    key: str,
+    *,
+    display_key: str | None = None,
+) -> int:
     """读取严格大于零的整数配置，布尔值不能冒充整数。"""
 
     value = parent.get(key)
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"配置项 {key} 必须是正整数。")
+        raise ValueError(f"配置项 {display_key or key} 必须是正整数。")
     return value
 
 
@@ -133,6 +138,37 @@ def validate_config(config: dict[str, Any]) -> None:
     for key, value in (("seed_start", seed_start), ("split_seed", split_seed)):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"dppo.dataset.{key} 必须是非负整数。")
+
+    pretraining = _require_mapping(dppo, "pretraining")
+    _require_positive_integer(
+        pretraining,
+        "epochs",
+        display_key="dppo.pretraining.epochs",
+    )
+    _require_positive_integer(
+        pretraining,
+        "batch_size",
+        display_key="dppo.pretraining.batch_size",
+    )
+    for key in ("learning_rate", "gradient_clip_norm"):
+        value = pretraining.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ValueError(f"dppo.pretraining.{key} 必须是正有限数。")
+    pretraining_seed = pretraining.get("seed")
+    if (
+        isinstance(pretraining_seed, bool)
+        or not isinstance(pretraining_seed, int)
+        or pretraining_seed < 0
+    ):
+        raise ValueError("dppo.pretraining.seed 必须是非负整数。")
+    pretraining_output = pretraining.get("output_root")
+    if not isinstance(pretraining_output, str) or not pretraining_output:
+        raise ValueError("dppo.pretraining.output_root 必须是非空字符串。")
 
     _require_mapping(dppo, "training")
 

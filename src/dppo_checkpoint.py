@@ -1,0 +1,359 @@
+"""实现 DPPO 扩散预训练循环和可严格校验的版本化检查点。"""
+
+from dataclasses import asdict, dataclass, fields
+import math
+from pathlib import Path
+from typing import Any
+
+import torch
+
+from src.dppo_diffusion import (
+    ConditionalDiffusionMLP,
+    CosineNoiseSchedule,
+    diffusion_noise_loss,
+)
+
+
+@dataclass(frozen=True)
+class DPPOCheckpointMetadata:
+    """保存决定检查点能否安全复用的全部实验模式字段。"""
+
+    state_schema_version: str
+    action_schema_version: str
+    state_dim: int
+    action_dim: int
+    mec_count: int
+    compute_node_count: int
+    function_count: int
+    diffusion_steps: int
+    fine_tuned_steps: int
+    maximum_retention_seconds: float
+    replica_threshold: float
+    config_hash: str
+
+    def __post_init__(self) -> None:
+        """拒绝无法构成合法 DPPO 场景或动作编码的元数据。"""
+
+        for name in (
+            "state_schema_version",
+            "action_schema_version",
+            "config_hash",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise ValueError(f"{name} 必须是非空字符串。")
+        for name in (
+            "state_dim",
+            "action_dim",
+            "mec_count",
+            "compute_node_count",
+            "function_count",
+            "diffusion_steps",
+            "fine_tuned_steps",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} 必须是正整数。")
+        if self.fine_tuned_steps > self.diffusion_steps:
+            raise ValueError("fine_tuned_steps 不能大于 diffusion_steps。")
+        retention = float(self.maximum_retention_seconds)
+        if not math.isfinite(retention) or retention <= 0.0:
+            raise ValueError("maximum_retention_seconds 必须是正有限数。")
+        threshold = float(self.replica_threshold)
+        if not math.isfinite(threshold) or not -1.0 < threshold <= 1.0:
+            raise ValueError("replica_threshold 必须位于 (-1, 1]。")
+        object.__setattr__(self, "maximum_retention_seconds", retention)
+        object.__setattr__(self, "replica_threshold", threshold)
+
+
+@dataclass(frozen=True)
+class LoadedDPPOCheckpoint:
+    """保存恢复后的网络、优化器、元数据和训练进度。"""
+
+    model: ConditionalDiffusionMLP
+    optimizer: torch.optim.Adam
+    metadata: DPPOCheckpointMetadata
+    epoch: int
+    rng_state: torch.Tensor
+
+
+def validate_checkpoint_metadata(
+    actual: DPPOCheckpointMetadata,
+    expected: DPPOCheckpointMetadata,
+) -> None:
+    """逐字段检查兼容性，并在错误中明确指出不匹配字段。"""
+
+    if not isinstance(actual, DPPOCheckpointMetadata):
+        raise TypeError("actual 必须是 DPPOCheckpointMetadata。")
+    if not isinstance(expected, DPPOCheckpointMetadata):
+        raise TypeError("expected 必须是 DPPOCheckpointMetadata。")
+    for field in fields(DPPOCheckpointMetadata):
+        if getattr(actual, field.name) != getattr(expected, field.name):
+            raise ValueError(f"检查点 {field.name} 与当前配置不一致。")
+
+
+def resolve_torch_device(device: str | torch.device) -> torch.device:
+    """解析训练设备；请求不可用 CUDA 时明确失败而非静默降级。"""
+
+    try:
+        resolved = torch.device(device)
+    except (TypeError, RuntimeError) as error:
+        raise ValueError(f"无效的 PyTorch 设备：{device!r}。") from error
+    if resolved.type not in {"cpu", "cuda"}:
+        raise ValueError("预训练设备只能是 cpu 或 cuda。")
+    if resolved.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("请求了 CUDA，但当前 PyTorch 环境没有可用 CUDA 设备。")
+    return resolved
+
+
+def seed_torch_for_pretraining(
+    seed: int,
+    device: str | torch.device,
+) -> torch.device:
+    """在创建模型前统一设置 CPU 和可选 CUDA 的预训练随机种子。"""
+
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("预训练 seed 必须是非负整数。")
+    resolved = resolve_torch_device(device)
+    torch.manual_seed(seed)
+    if resolved.type == "cuda":
+        torch.cuda.manual_seed_all(seed)
+    return resolved
+
+
+def _validate_training_tensors(
+    model: ConditionalDiffusionMLP,
+    states: torch.Tensor,
+    clean_actions: torch.Tensor,
+    batch_size: int,
+    seed: int,
+) -> int:
+    """统一检查预训练和验证所需数据形状与超参数。"""
+
+    if not isinstance(states, torch.Tensor) or states.shape[1:] != (
+        model.state_dim,
+    ):
+        raise ValueError(f"states 的 state_dim 必须为 {model.state_dim}。")
+    if not isinstance(clean_actions, torch.Tensor) or clean_actions.shape[1:] != (
+        model.action_dim,
+    ):
+        raise ValueError(
+            f"clean_actions 的 action_dim 必须为 {model.action_dim}。"
+        )
+    if states.ndim != 2 or clean_actions.ndim != 2:
+        raise ValueError("states 和 clean_actions 必须是二维张量。")
+    if states.shape[0] != clean_actions.shape[0] or states.shape[0] == 0:
+        raise ValueError("states 和 clean_actions 必须具有相同的非零样本数。")
+    if not states.is_floating_point() or not clean_actions.is_floating_point():
+        raise ValueError("states 和 clean_actions 必须是浮点张量。")
+    if isinstance(batch_size, bool) or not isinstance(batch_size, int) or batch_size <= 0:
+        raise ValueError("batch_size 必须是正整数。")
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ValueError("seed 必须是非负整数。")
+    return int(states.shape[0])
+
+
+def _select_batch(
+    values: torch.Tensor,
+    indices: torch.Tensor,
+    device: torch.device,
+) -> torch.Tensor:
+    """在数据原设备取批次，再送入目标训练设备。"""
+
+    source_indices = indices.to(values.device)
+    return values.index_select(0, source_indices).to(
+        device=device,
+        dtype=torch.float32,
+    )
+
+
+def pretrain_diffusion_epoch(
+    model: ConditionalDiffusionMLP,
+    schedule: CosineNoiseSchedule,
+    optimizer: torch.optim.Optimizer,
+    states: torch.Tensor,
+    clean_actions: torch.Tensor,
+    *,
+    batch_size: int,
+    seed: int,
+    device: str | torch.device,
+    gradient_clip_norm: float | None = None,
+) -> float:
+    """确定性打乱专家样本并完成一轮扩散噪声预测训练。"""
+
+    resolved_device = resolve_torch_device(device)
+    sample_count = _validate_training_tensors(
+        model,
+        states,
+        clean_actions,
+        batch_size,
+        seed,
+    )
+    if gradient_clip_norm is not None and (
+        not math.isfinite(float(gradient_clip_norm))
+        or float(gradient_clip_norm) <= 0.0
+    ):
+        raise ValueError("gradient_clip_norm 必须是正有限数或 None。")
+    model.to(resolved_device)
+    model.train()
+    shuffle_generator = torch.Generator(device="cpu").manual_seed(seed)
+    noise_generator = torch.Generator(device=resolved_device).manual_seed(seed + 1)
+    permutation = torch.randperm(sample_count, generator=shuffle_generator)
+    total_loss = 0.0
+    total_examples = 0
+    for start in range(0, sample_count, batch_size):
+        indices = permutation[start : start + batch_size]
+        batch_states = _select_batch(states, indices, resolved_device)
+        batch_actions = _select_batch(clean_actions, indices, resolved_device)
+        optimizer.zero_grad(set_to_none=True)
+        loss = diffusion_noise_loss(
+            model,
+            schedule,
+            batch_states,
+            batch_actions,
+            noise_generator,
+        )
+        if not torch.isfinite(loss):
+            raise FloatingPointError("扩散预训练损失出现非有限值。")
+        loss.backward()
+        if gradient_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                float(gradient_clip_norm),
+                error_if_nonfinite=True,
+            )
+        optimizer.step()
+        examples = int(batch_states.shape[0])
+        total_loss += float(loss.detach().cpu()) * examples
+        total_examples += examples
+    return total_loss / total_examples
+
+
+def evaluate_diffusion_loss(
+    model: ConditionalDiffusionMLP,
+    schedule: CosineNoiseSchedule,
+    states: torch.Tensor,
+    clean_actions: torch.Tensor,
+    *,
+    batch_size: int,
+    seed: int,
+    device: str | torch.device,
+) -> float:
+    """使用固定随机种子计算一轮可复现的验证噪声损失。"""
+
+    resolved_device = resolve_torch_device(device)
+    sample_count = _validate_training_tensors(
+        model,
+        states,
+        clean_actions,
+        batch_size,
+        seed,
+    )
+    model.to(resolved_device)
+    was_training = model.training
+    model.eval()
+    noise_generator = torch.Generator(device=resolved_device).manual_seed(seed)
+    total_loss = 0.0
+    total_examples = 0
+    with torch.no_grad():
+        for start in range(0, sample_count, batch_size):
+            indices = torch.arange(start, min(start + batch_size, sample_count))
+            batch_states = _select_batch(states, indices, resolved_device)
+            batch_actions = _select_batch(clean_actions, indices, resolved_device)
+            loss = diffusion_noise_loss(
+                model,
+                schedule,
+                batch_states,
+                batch_actions,
+                noise_generator,
+            )
+            if not torch.isfinite(loss):
+                raise FloatingPointError("扩散验证损失出现非有限值。")
+            examples = int(batch_states.shape[0])
+            total_loss += float(loss.cpu()) * examples
+            total_examples += examples
+    model.train(was_training)
+    return total_loss / total_examples
+
+
+def save_dppo_checkpoint(
+    checkpoint_path: str | Path,
+    model: ConditionalDiffusionMLP,
+    optimizer: torch.optim.Optimizer,
+    metadata: DPPOCheckpointMetadata,
+    *,
+    epoch: int,
+) -> None:
+    """保存扩散网络、Adam 状态、完整元数据和随机状态。"""
+
+    if not isinstance(model, ConditionalDiffusionMLP):
+        raise TypeError("model 必须是 ConditionalDiffusionMLP。")
+    if not isinstance(optimizer, torch.optim.Adam):
+        raise TypeError("首版 DPPO 检查点只支持 torch.optim.Adam。")
+    if not isinstance(metadata, DPPOCheckpointMetadata):
+        raise TypeError("metadata 必须是 DPPOCheckpointMetadata。")
+    if model.state_dim != metadata.state_dim or model.action_dim != metadata.action_dim:
+        raise ValueError("模型维度与检查点元数据不一致。")
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        raise ValueError("epoch 必须是非负整数。")
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "format_version": "dppo-checkpoint-v1",
+        "metadata": asdict(metadata),
+        "model_hidden_dims": tuple(model.hidden_dims),
+        "model_state_dict": model.state_dict(),
+        "optimizer_class": "Adam",
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_states": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        ),
+    }
+    torch.save(payload, path)
+
+
+def load_dppo_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    expected: DPPOCheckpointMetadata,
+    device: str | torch.device,
+) -> LoadedDPPOCheckpoint:
+    """校验元数据后恢复模型、Adam、epoch 和 PyTorch 随机状态。"""
+
+    resolved_device = resolve_torch_device(device)
+    payload = torch.load(
+        Path(checkpoint_path),
+        map_location=resolved_device,
+        weights_only=True,
+    )
+    if payload.get("format_version") != "dppo-checkpoint-v1":
+        raise ValueError("检查点 format_version 不受支持。")
+    actual = DPPOCheckpointMetadata(**payload["metadata"])
+    validate_checkpoint_metadata(actual, expected)
+    model = ConditionalDiffusionMLP(
+        actual.state_dim,
+        actual.action_dim,
+        tuple(int(width) for width in payload["model_hidden_dims"]),
+    ).to(resolved_device)
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    if payload.get("optimizer_class") != "Adam":
+        raise ValueError("检查点优化器不是受支持的 Adam。")
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer.load_state_dict(payload["optimizer_state_dict"])
+    epoch = payload["epoch"]
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
+        raise ValueError("检查点 epoch 必须是非负整数。")
+    rng_state = payload["torch_rng_state"].cpu()
+    torch.set_rng_state(rng_state)
+    if resolved_device.type == "cuda" and payload["cuda_rng_states"]:
+        torch.cuda.set_rng_state_all(
+            [state.cpu() for state in payload["cuda_rng_states"]]
+        )
+    return LoadedDPPOCheckpoint(
+        model=model,
+        optimizer=optimizer,
+        metadata=actual,
+        epoch=epoch,
+        rng_state=rng_state.clone(),
+    )

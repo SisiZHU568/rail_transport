@@ -583,6 +583,15 @@ dppo:
     test_fraction: 0.15
     output_root: results/dppo/datasets
 
+  pretraining:
+    # 以下参数用于专家数据上的扩散噪声预测预训练。
+    epochs: 50
+    batch_size: 64
+    learning_rate: 0.0003
+    gradient_clip_norm: 5.0
+    seed: 12000
+    output_root: results/dppo/pretraining
+
   training:
     state_schema_version: dppo-v1-flat
     gamma: 0.99

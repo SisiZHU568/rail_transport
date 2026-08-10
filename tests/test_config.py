@@ -82,3 +82,19 @@ def test_validate_config_requires_positive_dataset_slow_steps() -> None:
 
     with pytest.raises(ValueError, match="max_slow_steps_per_episode"):
         validate_config(config)
+
+
+def test_validate_config_requires_positive_pretraining_batch_size() -> None:
+    """扩散预训练参数错误时应在读取配置阶段暴露。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["pretraining"] = {
+        "epochs": 1,
+        "batch_size": 0,
+        "learning_rate": 0.0003,
+        "seed": 12000,
+        "output_root": "results/dppo/pretraining",
+    }
+
+    with pytest.raises(ValueError, match="pretraining.batch_size"):
+        validate_config(config)

@@ -1035,8 +1035,10 @@ git commit -m "feat: add conditional diffusion policy network"
 - Create: `tests/test_dppo_checkpoint.py`
 - Create: `run_dppo_pretraining.py`
 - Modify: `configs/debug.yaml`
+- Modify: `src/config.py`
+- Modify: `tests/test_config.py`
 
-- [ ] **Step 1: Write failing pre-training checkpoint tests**
+- [x] **Step 1: Write failing pre-training checkpoint tests**
 
 Train two mini-batches from a tiny synthetic expert dataset, save, reload, and assert identical seeded samples. Verify mismatched state dimension, action dimension, topology count, function count, diffusion steps, or configuration hash raises a specific `ValueError`.
 
@@ -1068,11 +1070,11 @@ def test_checkpoint_rejects_incompatible_dimensions(tmp_path) -> None:
         )
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_checkpoint.py`; expect missing checkpoint module.
 
-- [ ] **Step 3: Implement metadata, trainer, and CLI**
+- [x] **Step 3: Implement metadata, trainer, and CLI**
 
 `DPPOCheckpointMetadata` stores `dppo-v1-flat`, `joint-sfc-continuous-v1`, dimensions/counts, 20 diffusion steps, 5 fine-tuned steps, retention maximum, replica threshold, and config hash. Save model, optimizer, metadata, epoch, and RNG state. CLI accepts `--dataset-root`, `--output-root`, `--epochs`, and `--device {cpu,cuda}`; reject unavailable CUDA explicitly.
 
@@ -1102,11 +1104,11 @@ def validate_checkpoint_metadata(
             raise ValueError(f"Checkpoint {field.name} does not match configuration.")
 ```
 
-- [ ] **Step 4: Run checkpoint test and one-epoch temporary pre-training**
+- [x] **Step 4: Run checkpoint test and one-epoch temporary pre-training**
 
 Run tests, then use the Task 10 smoke dataset with `--epochs 1 --device cpu`. Expected: finite train/validation loss and reloadable checkpoint outside the repository.
 
-- [ ] **Step 5: Commit pre-training**
+- [x] **Step 5: Commit pre-training**
 
 ```powershell
 git add src/dppo_checkpoint.py tests/test_dppo_checkpoint.py run_dppo_pretraining.py configs/debug.yaml
