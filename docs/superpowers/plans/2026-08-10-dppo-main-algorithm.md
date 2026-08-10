@@ -792,8 +792,10 @@ git commit -m "feat: add causal DPPO slow-timescale environment"
 **Files:**
 - Create: `src/dppo_teacher.py`
 - Create: `tests/test_dppo_teacher.py`
+- Modify: `src/dppo_scenario.py`
+- Modify: `src/dppo_slow_timescale_env.py`
 
-- [ ] **Step 1: Write failing teacher tests**
+- [x] **Step 1: Write failing teacher tests**
 
 For a fixed public observation, verify cost teacher prefers near operational nodes and two replicas, reliability teacher uses three replicas and distinct domains, balanced teacher satisfies reliability before cost ranking, repeated calls are identical, and changing hidden future requests does not change the teacher action.
 
@@ -818,11 +820,11 @@ def test_teacher_is_deterministic_and_uses_declared_replica_policy(
     )
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_teacher.py`; expect missing teacher module.
 
-- [ ] **Step 3: Implement three deterministic teachers**
+- [x] **Step 3: Implement three deterministic teachers**
 
 Teachers receive only `DPPOStateSnapshot`, topology, function definitions, and public configuration. Score each operational node from normalized delay, free resources, reliability, and cloud cost using fixed teacher-specific lexicographic ordering rather than tunable reward weights. Encode complete node ranking with `1 - 2*j/(N-1)`, replicas as `-1/+1`, and retention through the inverse action scaling. Never call environment step to select the best action after observing a future window.
 
@@ -851,11 +853,11 @@ def build_simulation_teacher(name: str, scenario: DPPOScenario) -> SimulationTea
     return teacher_types[name](scenario.teacher_context)
 ```
 
-- [ ] **Step 4: Run teacher, action, and no-leakage tests**
+- [x] **Step 4: Run teacher, action, and no-leakage tests**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_teacher.py tests/test_dppo_action_space.py tests/test_workload_prediction.py`; expect PASS.
 
-- [ ] **Step 5: Commit teachers**
+- [x] **Step 5: Commit teachers**
 
 ```powershell
 git add src/dppo_teacher.py tests/test_dppo_teacher.py

@@ -122,8 +122,12 @@ def _environment_subconfig(
     return {str(key): float(value) for key, value in supplied.items()}
 
 
-def build_dppo_environment(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironment:
-    """创建配置驱动的 DPPO 环境及唯一共享快层执行器。"""
+def build_dppo_scenario(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironment:
+    """创建配置驱动的 DPPO 场景及唯一共享快层执行器。
+
+    当前场景对象就是可交互的 DPPO 环境。保留独立的场景命名，是为了让
+    教师数据生成和在线训练明确复用同一套拓扑、动作空间与执行核心。
+    """
 
     topology = build_linear_topology(config)
     if topology.cloud_node is None:
@@ -276,3 +280,9 @@ def build_dppo_environment(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironme
         state_encoder=DPPOStateEncoder(dimensions),
         execution_core=core,
     )
+
+
+def build_dppo_environment(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironment:
+    """兼容已有调用名称，并统一委托给唯一的 DPPO 场景工厂。"""
+
+    return build_dppo_scenario(config)

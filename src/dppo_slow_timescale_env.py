@@ -108,6 +108,15 @@ class DPPOSlowTimescaleEnvironment:
             self._history,
         )
 
+    def current_public_snapshot(self) -> DPPOStateSnapshot:
+        """返回当前决策点可公开给策略和仿真教师的因果快照。
+
+        教师通过这个入口读取与在线 DPPO 相同的信息，不能接触执行核心中
+        尚未发生的请求、故障状态或未来窗口执行结果。
+        """
+
+        return self._to_snapshot(self.execution_core.current_observation())
+
     def reset(self, seed: int | None = None) -> np.ndarray:
         """重置外生轨迹和历史，并返回当前规模对应的状态向量。"""
 
