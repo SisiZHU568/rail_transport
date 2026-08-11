@@ -3,10 +3,13 @@
 import pytest
 import torch
 
+from src.config import load_config
+from src.dppo import DPPOConfig
 from src.dppo_official_core import (
     official_clip_schedule,
     official_dppo_policy_loss,
 )
+from src.dppo_training_config import build_dppo_agent_config
 
 
 def test_official_clip_schedule_grows_from_base_to_maximum() -> None:
@@ -69,3 +72,29 @@ def test_official_policy_loss_is_finite_and_backpropagates() -> None:
     result.policy_loss.backward()
     assert new_log_probabilities.grad is not None
     assert torch.isfinite(new_log_probabilities.grad).all()
+
+
+def test_official_clip_settings_are_loaded_from_yaml() -> None:
+    """官方裁剪调度参数应由配置文件统一传入代理，而不是写死在算法中。"""
+
+    config = load_config("configs/debug.yaml")
+    agent_config = build_dppo_agent_config(config, clip_ratio=0.20)
+
+    assert agent_config.clip_ratio_base == pytest.approx(0.001)
+    assert agent_config.clip_ratio_rate == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize(
+    "settings",
+    (
+        {"clip_ratio": 0.10, "clip_ratio_base": 0.20},
+        {"clip_ratio_rate": 0.0},
+    ),
+)
+def test_dppo_config_rejects_invalid_official_clip_settings(
+    settings: dict[str, float],
+) -> None:
+    """裁剪下限不能超过上限，指数增长速率也必须为正。"""
+
+    with pytest.raises(ValueError):
+        DPPOConfig(**settings)

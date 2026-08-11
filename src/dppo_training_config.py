@@ -217,6 +217,8 @@ def build_dppo_agent_config(
             evaluation_sampling_min_std=settings.evaluation_sampling_min_std,
             target_kl=settings.target_kl,
             normalize_advantages=training["normalize_advantages"],
+            clip_ratio_base=training["clip_ratio_base"],
+            clip_ratio_rate=training["clip_ratio_rate"],
         )
     except KeyError as error:
         raise ValueError(f"DPPO 训练配置缺少字段：{error.args[0]}。") from error

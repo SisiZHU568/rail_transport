@@ -60,6 +60,9 @@ class DPPOConfig:
     evaluation_sampling_min_std: float = 0.001
     target_kl: float = 1.0
     normalize_advantages: bool = True
+    # 官方 DPPO 对不同去噪步骤使用从 base 到 clip_ratio 的指数裁剪调度。
+    clip_ratio_base: float = 0.001
+    clip_ratio_rate: float = 3.0
 
     def __post_init__(self) -> None:
         """在训练开始前一次性拦截无效超参数。"""
@@ -96,12 +99,24 @@ class DPPOConfig:
             self.evaluation_sampling_min_std,
         )
         target_kl = _finite_float("target_kl", self.target_kl)
+        clip_ratio_base = _finite_float(
+            "clip_ratio_base",
+            self.clip_ratio_base,
+        )
+        clip_ratio_rate = _finite_float(
+            "clip_ratio_rate",
+            self.clip_ratio_rate,
+        )
         if not 0.0 < gamma <= 1.0:
             raise ValueError("gamma 必须位于 (0, 1]。")
         if not 0.0 <= gae_lambda <= 1.0:
             raise ValueError("gae_lambda 必须位于 [0, 1]。")
         if not 0.0 < clip_ratio < 1.0:
             raise ValueError("clip_ratio 必须位于 (0, 1)。")
+        if not 0.0 < clip_ratio_base <= clip_ratio:
+            raise ValueError("clip_ratio_base 必须位于 (0, clip_ratio]。")
+        if clip_ratio_rate <= 0.0:
+            raise ValueError("clip_ratio_rate 必须大于零。")
         if not 0.0 < denoising_discount <= 1.0:
             raise ValueError("denoising_discount 必须位于 (0, 1]。")
         if policy_learning_rate <= 0.0 or value_learning_rate <= 0.0:
@@ -158,6 +173,8 @@ class DPPOConfig:
             evaluation_sampling_min_std,
         )
         object.__setattr__(self, "target_kl", target_kl)
+        object.__setattr__(self, "clip_ratio_base", clip_ratio_base)
+        object.__setattr__(self, "clip_ratio_rate", clip_ratio_rate)
         object.__setattr__(self, "value_hidden_dims", hidden_dims)
 
 
