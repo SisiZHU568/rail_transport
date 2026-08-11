@@ -17,6 +17,7 @@ from src.dppo_diffusion import (
     CosineNoiseSchedule,
     DenoisingSample,
 )
+from src.dppo_official_core import official_dppo_policy_loss
 
 
 def _finite_float(name: str, value: float) -> float:
@@ -797,16 +798,6 @@ class DPPOAgent:
             device=self.device,
         )
 
-        # 最接近最终动作 a_0 的转移指数为 0；越靠前的可训练步骤折扣越多。
-        denoising_exponents = torch.arange(
-            self.trainable_denoising_steps - 1,
-            -1,
-            -1,
-            device=self.device,
-            dtype=parameter.dtype,
-        )
-        denoising_weights = self.config.denoising_discount**denoising_exponents
-
         generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
         policy_losses: list[float] = []
         value_losses: list[float] = []
@@ -828,9 +819,6 @@ class DPPOAgent:
                     indices,
                 )
                 batch_advantages = outer_advantages.index_select(0, indices)
-                step_advantages = (
-                    batch_advantages.unsqueeze(1) * denoising_weights.unsqueeze(0)
-                )
 
                 new_log_probabilities = self._current_trainable_log_probabilities(
                     batch_states,
@@ -852,19 +840,28 @@ class DPPOAgent:
                     ).to(dtype=parameter.dtype).mean()
                 current_kl_value = float(current_kl.cpu().item())
                 approximate_kls.append(current_kl_value)
-                clip_fractions.append(float(clip_fraction.cpu().item()))
 
                 # 先用稳定 KL 判断早停，再让 PPO surrogate 计算 exp(log_ratio)：
                 # 极大漂移若先进入 exp 会溢出，而继续优化只会让策略离旧策略更远。
                 if current_kl_value >= self.config.target_kl:
+                    clip_fractions.append(float(clip_fraction.cpu().item()))
                     kl_early_stopped = True
                     break
 
-                policy_loss, _, _ = clipped_policy_surrogate(
+                # 官方 DPPO 核心在内部完成去噪折扣和分阶段裁剪；这里传入的
+                # 仍是每个环境时刻的单个优势，避免在代理层重复折扣。
+                official_loss = official_dppo_policy_loss(
                     new_log_probabilities,
                     batch_old_log_probabilities,
-                    step_advantages,
-                    clip_ratio=self.config.clip_ratio,
+                    batch_advantages,
+                    gamma_denoising=self.config.denoising_discount,
+                    maximum_clip_ratio=self.config.clip_ratio,
+                    base_clip_ratio=self.config.clip_ratio_base,
+                    growth_rate=self.config.clip_ratio_rate,
+                )
+                policy_loss = official_loss.policy_loss
+                clip_fractions.append(
+                    float(official_loss.clip_fraction.detach().cpu().item())
                 )
                 self._require_finite_loss("policy_loss", policy_loss)
                 self.policy_optimizer.zero_grad(set_to_none=True)

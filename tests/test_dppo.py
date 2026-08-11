@@ -19,6 +19,9 @@ from src.dppo import (
     normalize_advantages,
 )
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
+from src.dppo_official_core import (
+    official_dppo_policy_loss as real_official_dppo_policy_loss,
+)
 
 
 def _small_agent(
@@ -91,6 +94,48 @@ def _rollout_buffer(agent: DPPOAgent, rewards: tuple[float, ...]) -> DPPORollout
             )
         )
     return buffer
+
+
+def test_update_uses_official_dppo_loss_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """代理更新必须把 YAML 对应参数传入官方 DPPO 损失核心。"""
+
+    agent = _small_agent(batch_size=4, update_epochs=1)
+    buffer = _rollout_buffer(agent, (1.0, -0.5, 3.0, 0.25))
+    captured_settings: list[dict[str, float]] = []
+
+    def capture_official_loss(
+        new_log_probabilities: torch.Tensor,
+        old_log_probabilities: torch.Tensor,
+        advantages: torch.Tensor,
+        **settings: float,
+    ):
+        captured_settings.append(settings)
+        return real_official_dppo_policy_loss(
+            new_log_probabilities,
+            old_log_probabilities,
+            advantages,
+            **settings,
+        )
+
+    monkeypatch.setattr(
+        dppo_module,
+        "official_dppo_policy_loss",
+        capture_official_loss,
+        raising=False,
+    )
+
+    metrics = agent.update(buffer)
+
+    assert len(captured_settings) == 1
+    assert captured_settings[0] == {
+        "gamma_denoising": agent.config.denoising_discount,
+        "maximum_clip_ratio": agent.config.clip_ratio,
+        "base_clip_ratio": agent.config.clip_ratio_base,
+        "growth_rate": agent.config.clip_ratio_rate,
+    }
+    assert metrics["optimizer_step_count"] >= 1.0
 
 
 def test_rollout_transition_keeps_full_denoising_chain_as_immutable_copy() -> None:
@@ -387,9 +432,11 @@ def test_config_appends_ppo_stability_options_with_validated_defaults() -> None:
 
     assert config.target_kl == pytest.approx(1.0)
     assert config.normalize_advantages is True
-    assert tuple(DPPOConfig.__dataclass_fields__)[-2:] == (
+    assert tuple(DPPOConfig.__dataclass_fields__)[-4:] == (
         "target_kl",
         "normalize_advantages",
+        "clip_ratio_base",
+        "clip_ratio_rate",
     )
 
 
@@ -497,34 +544,29 @@ def test_update_normalizes_full_gae_before_applying_denoising_discount(
         len(transitions),
         generator=torch.Generator(device="cpu").manual_seed(agent.config.seed),
     ).numpy()
-    denoising_weights = agent.config.denoising_discount ** np.arange(
-        agent.trainable_denoising_steps - 1,
-        -1,
-        -1,
-    )
-    expected = (
-        normalize_advantages(raw_advantages)[permutation, None]
-        * denoising_weights[None, :]
-    )
+    expected = normalize_advantages(raw_advantages)[permutation]
     captured_advantages: list[np.ndarray] = []
-    original_surrogate = dppo_module.clipped_policy_surrogate
+    original_official_loss = dppo_module.official_dppo_policy_loss
 
-    def capture_surrogate(
+    def capture_official_loss(
         new_log_probabilities: torch.Tensor,
         old_log_probabilities: torch.Tensor,
         advantages: torch.Tensor,
-        *,
-        clip_ratio: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        **settings: float,
+    ):
         captured_advantages.append(advantages.detach().cpu().numpy().copy())
-        return original_surrogate(
+        return original_official_loss(
             new_log_probabilities,
             old_log_probabilities,
             advantages,
-            clip_ratio=clip_ratio,
+            **settings,
         )
 
-    monkeypatch.setattr(dppo_module, "clipped_policy_surrogate", capture_surrogate)
+    monkeypatch.setattr(
+        dppo_module,
+        "official_dppo_policy_loss",
+        capture_official_loss,
+    )
 
     agent.update(buffer)
 
@@ -556,31 +598,29 @@ def test_update_can_keep_raw_gae_before_denoising_discount(
         len(transitions),
         generator=torch.Generator(device="cpu").manual_seed(agent.config.seed),
     ).numpy()
-    denoising_weights = agent.config.denoising_discount ** np.arange(
-        agent.trainable_denoising_steps - 1,
-        -1,
-        -1,
-    )
-    expected = raw_advantages[permutation, None] * denoising_weights[None, :]
+    expected = raw_advantages[permutation]
     captured_advantages: list[np.ndarray] = []
-    original_surrogate = dppo_module.clipped_policy_surrogate
+    original_official_loss = dppo_module.official_dppo_policy_loss
 
-    def capture_surrogate(
+    def capture_official_loss(
         new_log_probabilities: torch.Tensor,
         old_log_probabilities: torch.Tensor,
         advantages: torch.Tensor,
-        *,
-        clip_ratio: float,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        **settings: float,
+    ):
         captured_advantages.append(advantages.detach().cpu().numpy().copy())
-        return original_surrogate(
+        return original_official_loss(
             new_log_probabilities,
             old_log_probabilities,
             advantages,
-            clip_ratio=clip_ratio,
+            **settings,
         )
 
-    monkeypatch.setattr(dppo_module, "clipped_policy_surrogate", capture_surrogate)
+    monkeypatch.setattr(
+        dppo_module,
+        "official_dppo_policy_loss",
+        capture_official_loss,
+    )
 
     agent.update(buffer)
 
