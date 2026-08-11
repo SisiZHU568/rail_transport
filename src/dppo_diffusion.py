@@ -165,10 +165,10 @@ class CosineNoiseSchedule:
             timesteps,
             noisy_actions,
         )
-        standard_deviations = variances.sqrt()
-        return standard_deviations.clamp_min(
-            float(minimum_standard_deviation)
-        ).expand_as(noisy_actions)
+        # 最后一个去噪步的理论方差为零；先在方差空间设置正下限，
+        # 再开方可明确保持“方差 -> 标准差”的计算顺序。
+        minimum_variance = float(minimum_standard_deviation) ** 2
+        return variances.clamp_min(minimum_variance).sqrt().expand_as(noisy_actions)
 
 
 def sinusoidal_timestep_embedding(

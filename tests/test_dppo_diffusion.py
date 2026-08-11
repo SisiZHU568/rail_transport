@@ -66,6 +66,27 @@ def test_reverse_standard_deviation_rejects_nonpositive_floor(
         )
 
 
+def test_reverse_standard_deviation_clamps_variance_before_float16_sqrt() -> None:
+    """半精度下限平方会下溢，可据此确认实现先限制方差、再计算标准差。"""
+
+    schedule = CosineNoiseSchedule(steps=20)
+    noisy_actions = torch.zeros((1, 2), dtype=torch.float16)
+    final_timesteps = torch.zeros(1, dtype=torch.long)
+    minimum_standard_deviation = 1e-4
+    expected = torch.full_like(
+        noisy_actions,
+        minimum_standard_deviation**2,
+    ).sqrt()
+
+    standard_deviations = schedule.reverse_standard_deviation(
+        noisy_actions,
+        final_timesteps,
+        minimum_standard_deviation=minimum_standard_deviation,
+    )
+
+    assert torch.equal(standard_deviations, expected)
+
+
 def test_q_sample_preserves_batch_action_shape_and_is_seeded() -> None:
     """前向加噪不得改变动作形状，同一噪声必须得到相同结果。"""
 
