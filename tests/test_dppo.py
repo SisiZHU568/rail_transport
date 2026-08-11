@@ -489,11 +489,11 @@ def test_hybrid_sampler_separates_sampling_and_probability_floors() -> None:
     expected_probability_logp = torch.distributions.Normal(
         final_means,
         probability_standard_deviations,
-    ).log_prob(final_actions).sum(dim=-1)
+    ).log_prob(final_actions).mean(dim=-1)
     sampling_logp = torch.distributions.Normal(
         final_means,
         sampling_standard_deviations,
-    ).log_prob(final_actions).sum(dim=-1)
+    ).log_prob(final_actions).mean(dim=-1)
 
     assert torch.all(sample.standard_deviations[-1] >= 0.01)
     assert torch.allclose(sample.log_probabilities[-1], expected_probability_logp)
@@ -514,11 +514,11 @@ def test_current_trainable_log_probabilities_use_probability_floor() -> None:
     expected_final_logp = torch.distributions.Normal(
         sample.means[-1],
         torch.full_like(sample.means[-1], 0.10),
-    ).log_prob(sample.actions[-1]).sum(dim=-1)
+    ).log_prob(sample.actions[-1]).mean(dim=-1)
     sampling_final_logp = torch.distributions.Normal(
         sample.means[-1],
         torch.full_like(sample.means[-1], 0.01),
-    ).log_prob(sample.actions[-1]).sum(dim=-1)
+    ).log_prob(sample.actions[-1]).mean(dim=-1)
 
     assert torch.allclose(current_log_probabilities[:, -1], expected_final_logp)
     assert not torch.allclose(current_log_probabilities[:, -1], sampling_final_logp)

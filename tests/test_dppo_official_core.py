@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from src.config import load_config
-from src.dppo import DPPOConfig
+from src.dppo import DPPOConfig, _gaussian_log_probability
 from src.dppo_official_core import (
     official_clip_schedule,
     official_dppo_policy_loss,
@@ -72,6 +72,26 @@ def test_official_policy_loss_is_finite_and_backpropagates() -> None:
     result.policy_loss.backward()
     assert new_log_probabilities.grad is not None
     assert torch.isfinite(new_log_probabilities.grad).all()
+
+
+def test_denoising_log_probability_averages_action_dimensions() -> None:
+    """轨道联合动作必须采用官方 DPPO 的动作维平均概率口径。"""
+
+    samples = torch.tensor([[0.0, 1.0, -1.0]], dtype=torch.float64)
+    means = torch.zeros_like(samples)
+    standard_deviations = torch.ones_like(samples)
+    expected = torch.distributions.Normal(
+        means,
+        standard_deviations,
+    ).log_prob(samples).mean(dim=-1)
+
+    actual = _gaussian_log_probability(
+        samples,
+        means,
+        standard_deviations,
+    )
+
+    assert torch.equal(actual, expected)
 
 
 def test_official_clip_settings_are_loaded_from_yaml() -> None:

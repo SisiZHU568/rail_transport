@@ -466,7 +466,7 @@ def _gaussian_log_probability(
     means: torch.Tensor,
     standard_deviations: torch.Tensor,
 ) -> torch.Tensor:
-    """计算独立动作维高斯分布的联合对数概率。"""
+    """按官方 DPPO 口径计算动作维平均对数概率。"""
 
     if samples.shape != means.shape or samples.shape != standard_deviations.shape:
         raise ValueError("高斯样本、均值和标准差形状必须一致。")
@@ -478,7 +478,9 @@ def _gaussian_log_probability(
         + 2.0 * standard_deviations.log()
         + math.log(2.0 * math.pi)
     )
-    return elementwise.sum(dim=-1)
+    # 官方实现先在动作块和动作维上取平均，再构造 PPO 概率比。
+    # 这样 MEC/VNF 扩容导致 Da 增大时，不会把同等策略变化成倍放大。
+    return elementwise.mean(dim=-1)
 
 
 class DPPOAgent:
