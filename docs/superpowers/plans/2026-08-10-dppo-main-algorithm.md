@@ -1123,7 +1123,7 @@ git commit -m "feat: pretrain and checkpoint DPPO diffusion policy"
 - Create: `src/dppo.py`
 - Create: `tests/test_dppo.py`
 
-- [ ] **Step 1: Write failing rollout and optimization tests**
+- [x] **Step 1: Write failing rollout and optimization tests**
 
 Test grouped environment transitions store full denoising chains, GAE matches a hand-calculated three-step example, terminal bootstrap is zero, probability ratios use old log probabilities, clipping bounds the surrogate, early 15 denoising steps stay frozen, final 5 steps change, and `clear()` empties the rollout buffer after update.
 
@@ -1141,11 +1141,11 @@ def test_gae_matches_three_step_manual_example() -> None:
     assert np.allclose(advantages, [5.5, 4.0, 1.5])
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo.py`; expect missing module.
 
-- [ ] **Step 3: Implement DPPO core**
+- [x] **Step 3: Implement DPPO core**
 
 Create `DPPOConfig`, `ValueNetwork`, `DPPORolloutBuffer`, `compute_gae`, and `DPPOAgent`. Keep a frozen pre-trained diffusion network for early steps and a trainable copy for final steps. Compute environment advantages once per outer transition, multiply them by `denoising_discount**k`, and apply the clipped PPO objective to trainable denoising log-probabilities. Apply value loss, gradient clipping, finite checks, and deterministic minibatch seeding.
 
@@ -1175,11 +1175,11 @@ class DPPORolloutBuffer:
         return len(self.transitions)
 ```
 
-- [ ] **Step 4: Run DPPO and diffusion tests**
+- [x] **Step 4: Run DPPO and diffusion tests**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo.py tests/test_dppo_diffusion.py tests/test_dppo_checkpoint.py`; expect PASS.
 
-- [ ] **Step 5: Commit DPPO optimizer**
+- [x] **Step 5: Commit DPPO optimizer**
 
 ```powershell
 git add src/dppo.py tests/test_dppo.py
