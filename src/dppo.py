@@ -359,10 +359,19 @@ def normalize_advantages(
     result = np.array(advantages_array, dtype=np.float32, copy=True)
     if result.size < 2:
         return result
-    standard_deviation = float(result.std(ddof=0))
+
+    # 输入契约仍是 float32，但统计与中心化使用 float64，避免大幅值优势在
+    # 平方求方差时溢出；退化情形则继续返回未改动的 float32 副本。
+    high_precision = result.astype(np.float64)
+    standard_deviation = float(high_precision.std(ddof=0))
     if standard_deviation <= threshold:
         return result
-    return (result - result.mean()) / standard_deviation
+    normalized = (
+        (high_precision - high_precision.mean()) / standard_deviation
+    ).astype(np.float32)
+    if not np.isfinite(normalized).all():
+        raise FloatingPointError("归一化后的 advantages 出现非有限值。")
+    return normalized
 
 
 def clipped_policy_surrogate(
@@ -404,14 +413,34 @@ def approximate_kl_divergence(
 
     if new_log_probabilities.shape != old_log_probabilities.shape:
         raise ValueError("新旧对数概率的形状必须一致。")
+    if new_log_probabilities.numel() == 0:
+        raise ValueError("新旧对数概率不能是空张量。")
     if not (
         torch.isfinite(new_log_probabilities).all()
         and torch.isfinite(old_log_probabilities).all()
     ):
         raise ValueError("新旧对数概率必须只包含有限数。")
-    log_ratio = new_log_probabilities - old_log_probabilities
-    ratio = torch.exp(log_ratio)
-    return ((ratio - 1.0) - log_ratio).mean()
+
+    # float64 的 expm1 在 log_ratio 接近零时不会丢掉 exp(x)-1 的小量，
+    # 从而避免 float32 相消把本应非负的 KL 诊断算成零或负数。
+    log_ratio = (
+        new_log_probabilities.to(dtype=torch.float64)
+        - old_log_probabilities.to(dtype=torch.float64)
+    )
+    elementwise_kl = torch.expm1(log_ratio) - log_ratio
+    if torch.isnan(elementwise_kl).any():
+        raise FloatingPointError("近似 KL 计算产生 NaN。")
+    maximum = torch.finfo(torch.float64).max
+    elementwise_kl = torch.nan_to_num(
+        elementwise_kl,
+        posinf=maximum,
+        neginf=maximum,
+    )
+    mean_kl = elementwise_kl.mean()
+    if torch.isnan(mean_kl):
+        raise FloatingPointError("近似 KL 均值产生 NaN。")
+    # 多个已饱和元素求均值时归约本身也可能溢出，继续饱和为有限最大值。
+    return torch.nan_to_num(mean_kl, posinf=maximum, neginf=maximum)
 
 
 def _gaussian_log_probability(
@@ -790,32 +819,37 @@ class DPPOAgent:
                     batch_states,
                     batch_chains,
                 )
-                policy_loss, ratios, clipped_ratios = clipped_policy_surrogate(
+                with torch.no_grad():
+                    current_kl = approximate_kl_divergence(
+                        new_log_probabilities,
+                        batch_old_log_probabilities,
+                    )
+                    log_ratio = (
+                        new_log_probabilities - batch_old_log_probabilities
+                    )
+                    lower_clip_log_ratio = math.log1p(-self.config.clip_ratio)
+                    upper_clip_log_ratio = math.log1p(self.config.clip_ratio)
+                    clip_fraction = (
+                        (log_ratio < lower_clip_log_ratio)
+                        | (log_ratio > upper_clip_log_ratio)
+                    ).to(dtype=parameter.dtype).mean()
+                current_kl_value = float(current_kl.cpu().item())
+                approximate_kls.append(current_kl_value)
+                clip_fractions.append(float(clip_fraction.cpu().item()))
+
+                # 先用稳定 KL 判断早停，再让 PPO surrogate 计算 exp(log_ratio)：
+                # 极大漂移若先进入 exp 会溢出，而继续优化只会让策略离旧策略更远。
+                if current_kl_value >= self.config.target_kl:
+                    kl_early_stopped = True
+                    break
+
+                policy_loss, _, _ = clipped_policy_surrogate(
                     new_log_probabilities,
                     batch_old_log_probabilities,
                     step_advantages,
                     clip_ratio=self.config.clip_ratio,
                 )
                 self._require_finite_loss("policy_loss", policy_loss)
-                with torch.no_grad():
-                    current_kl = approximate_kl_divergence(
-                        new_log_probabilities,
-                        batch_old_log_probabilities,
-                    )
-                    clip_fraction = (
-                        torch.abs(ratios - clipped_ratios) > 0.0
-                    ).to(dtype=parameter.dtype).mean()
-                current_kl_value = float(current_kl.cpu().item())
-                policy_losses.append(float(policy_loss.detach().cpu().item()))
-                approximate_kls.append(current_kl_value)
-                clip_fractions.append(float(clip_fraction.cpu().item()))
-
-                # KL 已到阈值时继续优化只会让新策略离采样策略更远；因此必须在
-                # 当前批次反向传播之前停下，并跳过价值网络的同步更新。
-                if current_kl_value >= self.config.target_kl:
-                    kl_early_stopped = True
-                    break
-
                 self.policy_optimizer.zero_grad(set_to_none=True)
                 policy_loss.backward()
                 policy_parameters = tuple(self.trainable_policy.parameters())
@@ -826,6 +860,7 @@ class DPPOAgent:
                 )
                 self.policy_optimizer.step()
                 optimizer_step_count += 1
+                policy_losses.append(float(policy_loss.detach().cpu().item()))
 
                 self.value_optimizer.zero_grad(set_to_none=True)
                 predicted_values = self.value_network(batch_states)

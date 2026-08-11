@@ -203,6 +203,20 @@ def test_normalize_advantages_keeps_singleton_and_constant_values(
     assert not np.shares_memory(normalized, advantages)
 
 
+def test_normalize_advantages_handles_large_finite_float32_values() -> None:
+    """大幅值优势用高精度统计，不能在求方差时溢出并丢失尺度。"""
+
+    normalized = normalize_advantages(
+        np.asarray([3e38, -3e38], dtype=np.float32),
+    )
+    high_precision = normalized.astype(np.float64)
+
+    assert normalized.dtype == np.float32
+    assert np.isfinite(normalized).all()
+    assert high_precision.mean() == pytest.approx(0.0, abs=1e-12)
+    assert high_precision.std(ddof=0) == pytest.approx(1.0, abs=1e-7)
+
+
 def test_normalize_advantages_rejects_non_vector_input() -> None:
     """优势必须明确对应一条一维环境轨迹。"""
 
@@ -228,8 +242,8 @@ def test_approximate_kl_divergence_matches_exact_stable_formula() -> None:
 
     new_log_probabilities = torch.tensor([[0.1, -0.4], [0.7, -1.2]])
     old_log_probabilities = torch.tensor([[-0.2, -0.1], [0.5, -0.8]])
-    log_ratio = new_log_probabilities - old_log_probabilities
-    expected = ((torch.exp(log_ratio) - 1.0) - log_ratio).mean()
+    log_ratio = new_log_probabilities.double() - old_log_probabilities.double()
+    expected = (torch.expm1(log_ratio) - log_ratio).mean()
 
     actual = approximate_kl_divergence(
         new_log_probabilities,
@@ -237,6 +251,57 @@ def test_approximate_kl_divergence_matches_exact_stable_formula() -> None:
     )
 
     assert torch.equal(actual, expected)
+
+
+def test_approximate_kl_divergence_preserves_small_log_ratio_precision() -> None:
+    """正负小量必须使用高精度 expm1，避免相消产生负 KL 或丢失信号。"""
+
+    new_log_probabilities = torch.tensor([1e-4, -1e-4], dtype=torch.float32)
+    old_log_probabilities = torch.zeros(2, dtype=torch.float32)
+    represented_ratios = [float(value) for value in new_log_probabilities]
+    expected = sum(
+        math.expm1(log_ratio) - log_ratio for log_ratio in represented_ratios
+    ) / len(represented_ratios)
+
+    actual = approximate_kl_divergence(
+        new_log_probabilities,
+        old_log_probabilities,
+    )
+
+    assert actual.dtype == torch.float64
+    assert actual.item() >= 0.0
+    assert actual.item() == pytest.approx(expected, rel=1e-12, abs=1e-18)
+
+
+def test_approximate_kl_divergence_keeps_large_finite_log_ratio_finite() -> None:
+    """float32 会溢出的有限漂移仍应产生可用于早停的有限大 KL。"""
+
+    actual = approximate_kl_divergence(
+        torch.tensor([90.0], dtype=torch.float32),
+        torch.zeros(1, dtype=torch.float32),
+    )
+
+    assert torch.isfinite(actual)
+    assert actual.item() > 1.0
+
+
+def test_approximate_kl_divergence_saturates_float64_overflow() -> None:
+    """极端有限漂移饱和到 float64 最大值，以便更新路径正常执行 KL 早停。"""
+
+    actual = approximate_kl_divergence(
+        torch.tensor([1000.0], dtype=torch.float64),
+        torch.zeros(1, dtype=torch.float64),
+    )
+
+    assert torch.isfinite(actual)
+    assert actual.item() == torch.finfo(torch.float64).max
+
+
+def test_approximate_kl_divergence_rejects_empty_tensors() -> None:
+    """空批次没有可解释的 KL 均值，必须明确拒绝。"""
+
+    with pytest.raises(ValueError, match="空"):
+        approximate_kl_divergence(torch.empty(0), torch.empty(0))
 
 
 def test_approximate_kl_divergence_rejects_mismatched_shapes() -> None:
@@ -542,6 +607,57 @@ def test_update_stops_future_batches_after_kl_reaches_tiny_target() -> None:
     assert metrics["maximum_approximate_kl"] >= agent.config.target_kl
     assert len(buffer) == 0
     assert all(math.isfinite(value) for value in metrics.values())
+
+
+def test_update_stops_before_surrogate_when_log_ratio_is_extreme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """极大 KL 必须在 PPO 的 exp 概率比之前早停，且首批不产生优化指标。"""
+
+    agent = _small_agent(batch_size=1, update_epochs=2, target_kl=1.0)
+    buffer = _rollout_buffer(agent, (1.0,))
+    old_log_probabilities = torch.as_tensor(
+        np.array(
+            buffer.transitions[0].old_log_probabilities[
+                agent.frozen_denoising_steps :
+            ],
+            copy=True,
+        ),
+        dtype=torch.float32,
+    ).unsqueeze(0)
+
+    def extreme_current_log_probabilities(
+        states: torch.Tensor,
+        denoising_actions: torch.Tensor,
+    ) -> torch.Tensor:
+        del states, denoising_actions
+        return old_log_probabilities + 90.0
+
+    def unexpected_call(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise AssertionError("KL 早停后不得计算 surrogate 或执行 optimizer.step")
+
+    monkeypatch.setattr(
+        agent,
+        "_current_trainable_log_probabilities",
+        extreme_current_log_probabilities,
+    )
+    monkeypatch.setattr(dppo_module, "clipped_policy_surrogate", unexpected_call)
+    monkeypatch.setattr(agent.policy_optimizer, "step", unexpected_call)
+    monkeypatch.setattr(agent.value_optimizer, "step", unexpected_call)
+
+    metrics = agent.update(buffer)
+
+    assert metrics["kl_early_stopped"] == 1.0
+    assert metrics["optimizer_step_count"] == 0.0
+    assert metrics["policy_loss"] == 0.0
+    assert metrics["value_loss"] == 0.0
+    assert metrics["gradient_norm"] == 0.0
+    assert metrics["approximate_kl"] == metrics["maximum_approximate_kl"]
+    assert math.isfinite(metrics["approximate_kl"])
+    assert metrics["approximate_kl"] > agent.config.target_kl
+    assert metrics["clip_fraction"] == 1.0
+    assert len(buffer) == 0
 
 
 def test_update_changes_only_trainable_policy_and_clears_buffer() -> None:
