@@ -253,6 +253,8 @@ def test_collect_rollout_keeps_rejected_action_on_policy() -> None:
     losses = agent.update(buffer)
     assert math.isfinite(losses["policy_loss"])
     assert math.isfinite(losses["value_loss"])
+    assert losses["optimizer_step_count"] >= 1.0
+    assert 0.0 <= losses["clip_fraction"] <= 1.0
 
 
 def test_online_checkpoint_restores_both_policy_layers_and_value_network(
