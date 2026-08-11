@@ -58,6 +58,8 @@ class DPPOConfig:
     training_sampling_min_std: float = 0.01
     probability_min_std: float = 0.10
     evaluation_sampling_min_std: float = 0.001
+    target_kl: float = 1.0
+    normalize_advantages: bool = True
 
     def __post_init__(self) -> None:
         """在训练开始前一次性拦截无效超参数。"""
@@ -93,6 +95,7 @@ class DPPOConfig:
             "evaluation_sampling_min_std",
             self.evaluation_sampling_min_std,
         )
+        target_kl = _finite_float("target_kl", self.target_kl)
         if not 0.0 < gamma <= 1.0:
             raise ValueError("gamma 必须位于 (0, 1]。")
         if not 0.0 <= gae_lambda <= 1.0:
@@ -105,6 +108,10 @@ class DPPOConfig:
             raise ValueError("策略和价值网络学习率必须大于零。")
         if gradient_clip_norm <= 0.0:
             raise ValueError("gradient_clip_norm 必须大于零。")
+        if target_kl <= 0.0:
+            raise ValueError("target_kl 必须是正有限数。")
+        if not isinstance(self.normalize_advantages, bool):
+            raise ValueError("normalize_advantages 必须是 bool。")
         for name, value in (
             ("training_sampling_min_std", training_sampling_min_std),
             ("probability_min_std", probability_min_std),
@@ -150,6 +157,7 @@ class DPPOConfig:
             "evaluation_sampling_min_std",
             evaluation_sampling_min_std,
         )
+        object.__setattr__(self, "target_kl", target_kl)
         object.__setattr__(self, "value_hidden_dims", hidden_dims)
 
 
@@ -329,6 +337,34 @@ def compute_gae(
     return advantages, advantages + values_array
 
 
+def normalize_advantages(
+    advantages: np.ndarray,
+    *,
+    minimum_standard_deviation: float = 1e-8,
+) -> np.ndarray:
+    """用整条环境轨迹的总体统计量归一化优势。"""
+
+    advantages_array = np.asarray(advantages, dtype=np.float32)
+    if advantages_array.ndim != 1:
+        raise ValueError("advantages 必须是一维数组。")
+    if not np.isfinite(advantages_array).all():
+        raise ValueError("advantages 必须只包含有限数。")
+    threshold = _finite_float(
+        "minimum_standard_deviation",
+        minimum_standard_deviation,
+    )
+    if threshold < 0.0:
+        raise ValueError("minimum_standard_deviation 必须是非负有限数。")
+
+    result = np.array(advantages_array, dtype=np.float32, copy=True)
+    if result.size < 2:
+        return result
+    standard_deviation = float(result.std(ddof=0))
+    if standard_deviation <= threshold:
+        return result
+    return (result - result.mean()) / standard_deviation
+
+
 def clipped_policy_surrogate(
     new_log_probabilities: torch.Tensor,
     old_log_probabilities: torch.Tensor,
@@ -358,6 +394,24 @@ def clipped_policy_surrogate(
     clipped_ratios = ratios.clamp(1.0 - clip, 1.0 + clip)
     surrogate = torch.minimum(ratios * advantages, clipped_ratios * advantages)
     return -surrogate.mean(), ratios, clipped_ratios
+
+
+def approximate_kl_divergence(
+    new_log_probabilities: torch.Tensor,
+    old_log_probabilities: torch.Tensor,
+) -> torch.Tensor:
+    """以非负且数值稳定的 PPO 近似式计算当前批次 KL。"""
+
+    if new_log_probabilities.shape != old_log_probabilities.shape:
+        raise ValueError("新旧对数概率的形状必须一致。")
+    if not (
+        torch.isfinite(new_log_probabilities).all()
+        and torch.isfinite(old_log_probabilities).all()
+    ):
+        raise ValueError("新旧对数概率必须只包含有限数。")
+    log_ratio = new_log_probabilities - old_log_probabilities
+    ratio = torch.exp(log_ratio)
+    return ((ratio - 1.0) - log_ratio).mean()
 
 
 def _gaussian_log_probability(
@@ -663,6 +717,10 @@ class DPPOAgent:
             gamma=self.config.gamma,
             gae_lambda=self.config.gae_lambda,
         )
+        if self.config.normalize_advantages:
+            # 先在完整环境轨迹上只归一化一次，保留各环境时刻的相对尺度；
+            # 去噪折扣稍后才展开，不能反过来污染归一化统计量。
+            advantages = normalize_advantages(advantages)
 
         parameter = next(self.trainable_policy.parameters())
         states = torch.as_tensor(
@@ -709,6 +767,8 @@ class DPPOAgent:
         approximate_kls: list[float] = []
         clip_fractions: list[float] = []
         gradient_norms: list[float] = []
+        optimizer_step_count = 0
+        kl_early_stopped = False
         sample_count = len(transitions)
         for _ in range(self.config.update_epochs):
             permutation = torch.randperm(sample_count, generator=generator)
@@ -726,7 +786,6 @@ class DPPOAgent:
                     batch_advantages.unsqueeze(1) * denoising_weights.unsqueeze(0)
                 )
 
-                self.policy_optimizer.zero_grad(set_to_none=True)
                 new_log_probabilities = self._current_trainable_log_probabilities(
                     batch_states,
                     batch_chains,
@@ -738,6 +797,26 @@ class DPPOAgent:
                     clip_ratio=self.config.clip_ratio,
                 )
                 self._require_finite_loss("policy_loss", policy_loss)
+                with torch.no_grad():
+                    current_kl = approximate_kl_divergence(
+                        new_log_probabilities,
+                        batch_old_log_probabilities,
+                    )
+                    clip_fraction = (
+                        torch.abs(ratios - clipped_ratios) > 0.0
+                    ).to(dtype=parameter.dtype).mean()
+                current_kl_value = float(current_kl.cpu().item())
+                policy_losses.append(float(policy_loss.detach().cpu().item()))
+                approximate_kls.append(current_kl_value)
+                clip_fractions.append(float(clip_fraction.cpu().item()))
+
+                # KL 已到阈值时继续优化只会让新策略离采样策略更远；因此必须在
+                # 当前批次反向传播之前停下，并跳过价值网络的同步更新。
+                if current_kl_value >= self.config.target_kl:
+                    kl_early_stopped = True
+                    break
+
+                self.policy_optimizer.zero_grad(set_to_none=True)
                 policy_loss.backward()
                 policy_parameters = tuple(self.trainable_policy.parameters())
                 policy_gradient_norm = self._clip_and_check_gradients(
@@ -746,6 +825,7 @@ class DPPOAgent:
                     self.config.gradient_clip_norm,
                 )
                 self.policy_optimizer.step()
+                optimizer_step_count += 1
 
                 self.value_optimizer.zero_grad(set_to_none=True)
                 predicted_values = self.value_network(batch_states)
@@ -761,25 +841,26 @@ class DPPOAgent:
                 )
                 self.value_optimizer.step()
 
-                with torch.no_grad():
-                    approximate_kl = (
-                        batch_old_log_probabilities - new_log_probabilities
-                    ).mean()
-                    clip_fraction = (
-                        torch.abs(ratios - clipped_ratios) > 0.0
-                    ).to(dtype=parameter.dtype).mean()
-                policy_losses.append(float(policy_loss.detach().cpu().item()))
                 value_losses.append(float(value_loss.detach().cpu().item()))
-                approximate_kls.append(float(approximate_kl.cpu().item()))
-                clip_fractions.append(float(clip_fraction.cpu().item()))
                 gradient_norms.append(policy_gradient_norm)
+            if kl_early_stopped:
+                break
 
         metrics = {
-            "policy_loss": float(np.mean(policy_losses)),
-            "value_loss": float(np.mean(value_losses)),
-            "approximate_kl": float(np.mean(approximate_kls)),
-            "clip_fraction": float(np.mean(clip_fractions)),
-            "gradient_norm": float(np.mean(gradient_norms)),
+            "policy_loss": float(np.mean(policy_losses)) if policy_losses else 0.0,
+            "value_loss": float(np.mean(value_losses)) if value_losses else 0.0,
+            "approximate_kl": (
+                float(np.mean(approximate_kls)) if approximate_kls else 0.0
+            ),
+            "maximum_approximate_kl": max(approximate_kls, default=0.0),
+            "clip_fraction": (
+                float(np.mean(clip_fractions)) if clip_fractions else 0.0
+            ),
+            "gradient_norm": (
+                float(np.mean(gradient_norms)) if gradient_norms else 0.0
+            ),
+            "optimizer_step_count": float(optimizer_step_count),
+            "kl_early_stopped": float(kl_early_stopped),
         }
         if not all(math.isfinite(value) for value in metrics.values()):
             raise FloatingPointError("DDPO 更新指标出现非有限值。")

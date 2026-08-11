@@ -7,18 +7,30 @@ import numpy as np
 import pytest
 import torch
 
+import src.dppo as dppo_module
 from src.dppo import (
     DPPOAgent,
     DPPOConfig,
     DPPORolloutBuffer,
     DPPORolloutTransition,
+    approximate_kl_divergence,
     clipped_policy_surrogate,
     compute_gae,
+    normalize_advantages,
 )
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
 
 
-def _small_agent(*, diffusion_steps: int = 4, fine_tuned_steps: int = 2) -> DPPOAgent:
+def _small_agent(
+    *,
+    diffusion_steps: int = 4,
+    fine_tuned_steps: int = 2,
+    batch_size: int = 2,
+    update_epochs: int = 2,
+    policy_learning_rate: float = 1e-3,
+    target_kl: float = 1.0,
+    normalize_advantages: bool = True,
+) -> DPPOAgent:
     """构造运行速度快、但包含完整双层策略结构的测试智能体。"""
 
     torch.manual_seed(7)
@@ -28,11 +40,13 @@ def _small_agent(*, diffusion_steps: int = 4, fine_tuned_steps: int = 2) -> DPPO
         diffusion_steps=diffusion_steps,
         fine_tuned_steps=fine_tuned_steps,
         value_hidden_dims=(12, 12),
-        batch_size=2,
-        update_epochs=2,
-        policy_learning_rate=1e-3,
+        batch_size=batch_size,
+        update_epochs=update_epochs,
+        policy_learning_rate=policy_learning_rate,
         value_learning_rate=1e-3,
         seed=101,
+        target_kl=target_kl,
+        normalize_advantages=normalize_advantages,
     )
     return DPPOAgent(policy, schedule, config, device="cpu")
 
@@ -59,6 +73,24 @@ def _transition_from_sample(
         value=agent.value(state),
         terminated=terminated,
     )
+
+
+def _rollout_buffer(agent: DPPOAgent, rewards: tuple[float, ...]) -> DPPORolloutBuffer:
+    """按给定奖励构造一条确定性的完整环境轨迹。"""
+
+    buffer = DPPORolloutBuffer()
+    for index, reward in enumerate(rewards):
+        state = np.linspace(-0.5, 0.5, 6, dtype=np.float32) + index * 0.05
+        buffer.append(
+            _transition_from_sample(
+                agent,
+                state,
+                reward=reward,
+                terminated=index == len(rewards) - 1,
+                seed=30 + index,
+            )
+        )
+    return buffer
 
 
 def test_rollout_transition_keeps_full_denoising_chain_as_immutable_copy() -> None:
@@ -142,6 +174,91 @@ def test_gae_ignores_bootstrap_value_after_terminal_transition() -> None:
     assert np.allclose(returns, [2.0])
 
 
+def test_normalize_advantages_uses_full_trajectory_population_statistics() -> None:
+    """优势按整条环境轨迹的总体统计量归一化，并统一为 float32。"""
+
+    normalized = normalize_advantages(np.asarray([1.0, 2.0, 5.0, 8.0]))
+
+    assert normalized.dtype == np.float32
+    assert normalized.mean() == pytest.approx(0.0, abs=1e-7)
+    assert normalized.std(ddof=0) == pytest.approx(1.0, abs=1e-7)
+
+
+@pytest.mark.parametrize(
+    "advantages",
+    (
+        np.asarray([3.5], dtype=np.float64),
+        np.asarray([2.0, 2.0, 2.0], dtype=np.float64),
+    ),
+)
+def test_normalize_advantages_keeps_singleton_and_constant_values(
+    advantages: np.ndarray,
+) -> None:
+    """统计量不足或标准差过小时，返回原值的 float32 副本。"""
+
+    normalized = normalize_advantages(advantages)
+
+    assert normalized.dtype == np.float32
+    assert np.array_equal(normalized, advantages.astype(np.float32))
+    assert not np.shares_memory(normalized, advantages)
+
+
+def test_normalize_advantages_rejects_non_vector_input() -> None:
+    """优势必须明确对应一条一维环境轨迹。"""
+
+    with pytest.raises(ValueError, match="一维"):
+        normalize_advantages(np.ones((2, 2), dtype=np.float32))
+
+
+@pytest.mark.parametrize("threshold", (-1.0, math.inf, math.nan, True))
+def test_normalize_advantages_rejects_invalid_minimum_standard_deviation(
+    threshold: object,
+) -> None:
+    """归一化阈值只能是非负有限数，布尔值不能冒充数字。"""
+
+    with pytest.raises(ValueError, match="minimum_standard_deviation"):
+        normalize_advantages(
+            np.asarray([1.0, 2.0], dtype=np.float32),
+            minimum_standard_deviation=threshold,
+        )
+
+
+def test_approximate_kl_divergence_matches_exact_stable_formula() -> None:
+    """KL 诊断严格采用 (exp(log_ratio)-1)-log_ratio 的批均值。"""
+
+    new_log_probabilities = torch.tensor([[0.1, -0.4], [0.7, -1.2]])
+    old_log_probabilities = torch.tensor([[-0.2, -0.1], [0.5, -0.8]])
+    log_ratio = new_log_probabilities - old_log_probabilities
+    expected = ((torch.exp(log_ratio) - 1.0) - log_ratio).mean()
+
+    actual = approximate_kl_divergence(
+        new_log_probabilities,
+        old_log_probabilities,
+    )
+
+    assert torch.equal(actual, expected)
+
+
+def test_approximate_kl_divergence_rejects_mismatched_shapes() -> None:
+    """新旧策略对数概率必须逐元素对应。"""
+
+    with pytest.raises(ValueError, match="形状"):
+        approximate_kl_divergence(torch.zeros(2), torch.zeros(2, 1))
+
+
+@pytest.mark.parametrize("invalid_value", (math.inf, -math.inf, math.nan))
+def test_approximate_kl_divergence_rejects_non_finite_content(
+    invalid_value: float,
+) -> None:
+    """非有限对数概率不得进入指数运算污染训练诊断。"""
+
+    with pytest.raises(ValueError, match="有限"):
+        approximate_kl_divergence(
+            torch.tensor([0.0, invalid_value]),
+            torch.zeros(2),
+        )
+
+
 def test_clipped_surrogate_uses_old_log_probability_and_limits_ratio() -> None:
     """概率比必须以采样时旧概率为分母，并由 PPO 区间限制过大更新。"""
 
@@ -196,6 +313,37 @@ def test_config_preserves_original_positional_parameter_order() -> None:
 
     assert config.batch_size == 32
     assert config.training_sampling_min_std == pytest.approx(0.01)
+
+
+def test_config_appends_ppo_stability_options_with_validated_defaults() -> None:
+    """稳定性开关追加在已有字段末尾，避免破坏旧位置参数调用。"""
+
+    config = DPPOConfig()
+
+    assert config.target_kl == pytest.approx(1.0)
+    assert config.normalize_advantages is True
+    assert tuple(DPPOConfig.__dataclass_fields__)[-2:] == (
+        "target_kl",
+        "normalize_advantages",
+    )
+
+
+@pytest.mark.parametrize("target_kl", (0.0, -0.1, math.inf, math.nan, True))
+def test_config_rejects_invalid_target_kl(target_kl: object) -> None:
+    """KL 早停阈值必须是严格正的有限数。"""
+
+    with pytest.raises(ValueError, match="target_kl"):
+        DPPOConfig(target_kl=target_kl)
+
+
+@pytest.mark.parametrize("normalize", (0, 1, np.bool_(True), "yes", None))
+def test_config_requires_real_bool_for_advantage_normalization(
+    normalize: object,
+) -> None:
+    """归一化开关必须是真正的 bool，不能接受 truthy/falsy 替代品。"""
+
+    with pytest.raises(ValueError, match="normalize_advantages"):
+        DPPOConfig(normalize_advantages=normalize)
 
 
 def test_seeded_hybrid_sampler_records_every_reverse_transition() -> None:
@@ -264,6 +412,138 @@ def test_current_trainable_log_probabilities_use_probability_floor() -> None:
     assert not torch.allclose(current_log_probabilities[:, -1], sampling_final_logp)
 
 
+def test_update_normalizes_full_gae_before_applying_denoising_discount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """优势只在环境层归一化一次，随后才展开并乘每个去噪步骤的折扣。"""
+
+    agent = _small_agent(batch_size=4, update_epochs=1)
+    buffer = _rollout_buffer(agent, (1.0, -0.5, 3.0, 0.25))
+    transitions = tuple(buffer.transitions)
+    raw_advantages, _ = compute_gae(
+        rewards=np.asarray([item.reward for item in transitions]),
+        values=np.asarray([item.value for item in transitions]),
+        terminated=np.asarray([item.terminated for item in transitions]),
+        next_value=0.0,
+        gamma=agent.config.gamma,
+        gae_lambda=agent.config.gae_lambda,
+    )
+    permutation = torch.randperm(
+        len(transitions),
+        generator=torch.Generator(device="cpu").manual_seed(agent.config.seed),
+    ).numpy()
+    denoising_weights = agent.config.denoising_discount ** np.arange(
+        agent.trainable_denoising_steps - 1,
+        -1,
+        -1,
+    )
+    expected = (
+        normalize_advantages(raw_advantages)[permutation, None]
+        * denoising_weights[None, :]
+    )
+    captured_advantages: list[np.ndarray] = []
+    original_surrogate = dppo_module.clipped_policy_surrogate
+
+    def capture_surrogate(
+        new_log_probabilities: torch.Tensor,
+        old_log_probabilities: torch.Tensor,
+        advantages: torch.Tensor,
+        *,
+        clip_ratio: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        captured_advantages.append(advantages.detach().cpu().numpy().copy())
+        return original_surrogate(
+            new_log_probabilities,
+            old_log_probabilities,
+            advantages,
+            clip_ratio=clip_ratio,
+        )
+
+    monkeypatch.setattr(dppo_module, "clipped_policy_surrogate", capture_surrogate)
+
+    agent.update(buffer)
+
+    assert len(captured_advantages) == 1
+    assert np.allclose(captured_advantages[0], expected, atol=1e-6)
+
+
+def test_update_can_keep_raw_gae_before_denoising_discount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关闭归一化时，裁剪目标必须保留原始 GAE，仅施加去噪折扣。"""
+
+    agent = _small_agent(
+        batch_size=4,
+        update_epochs=1,
+        normalize_advantages=False,
+    )
+    buffer = _rollout_buffer(agent, (1.0, -0.5, 3.0, 0.25))
+    transitions = tuple(buffer.transitions)
+    raw_advantages, _ = compute_gae(
+        rewards=np.asarray([item.reward for item in transitions]),
+        values=np.asarray([item.value for item in transitions]),
+        terminated=np.asarray([item.terminated for item in transitions]),
+        next_value=0.0,
+        gamma=agent.config.gamma,
+        gae_lambda=agent.config.gae_lambda,
+    )
+    permutation = torch.randperm(
+        len(transitions),
+        generator=torch.Generator(device="cpu").manual_seed(agent.config.seed),
+    ).numpy()
+    denoising_weights = agent.config.denoising_discount ** np.arange(
+        agent.trainable_denoising_steps - 1,
+        -1,
+        -1,
+    )
+    expected = raw_advantages[permutation, None] * denoising_weights[None, :]
+    captured_advantages: list[np.ndarray] = []
+    original_surrogate = dppo_module.clipped_policy_surrogate
+
+    def capture_surrogate(
+        new_log_probabilities: torch.Tensor,
+        old_log_probabilities: torch.Tensor,
+        advantages: torch.Tensor,
+        *,
+        clip_ratio: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        captured_advantages.append(advantages.detach().cpu().numpy().copy())
+        return original_surrogate(
+            new_log_probabilities,
+            old_log_probabilities,
+            advantages,
+            clip_ratio=clip_ratio,
+        )
+
+    monkeypatch.setattr(dppo_module, "clipped_policy_surrogate", capture_surrogate)
+
+    agent.update(buffer)
+
+    assert len(captured_advantages) == 1
+    assert np.allclose(captured_advantages[0], expected, atol=1e-6)
+
+
+def test_update_stops_future_batches_after_kl_reaches_tiny_target() -> None:
+    """至少一次优化后触及极小 KL 阈值时，应停止当前余下的全部更新。"""
+
+    agent = _small_agent(
+        batch_size=4,
+        update_epochs=6,
+        policy_learning_rate=1e-2,
+        target_kl=1e-12,
+    )
+    buffer = _rollout_buffer(agent, (1.0, -0.5, 3.0, 0.25))
+    expected_batches = agent.config.update_epochs
+
+    metrics = agent.update(buffer)
+
+    assert 1.0 <= metrics["optimizer_step_count"] < expected_batches
+    assert metrics["kl_early_stopped"] == 1.0
+    assert metrics["maximum_approximate_kl"] >= agent.config.target_kl
+    assert len(buffer) == 0
+    assert all(math.isfinite(value) for value in metrics.values())
+
+
 def test_update_changes_only_trainable_policy_and_clears_buffer() -> None:
     """PPO 更新只能改变末段策略和价值网络，预训练前段必须保持不变。"""
 
@@ -304,7 +584,13 @@ def test_update_changes_only_trainable_policy_and_clears_buffer() -> None:
         "policy_loss",
         "value_loss",
         "approximate_kl",
+        "maximum_approximate_kl",
         "clip_fraction",
         "gradient_norm",
+        "optimizer_step_count",
+        "kl_early_stopped",
     }
+    assert metrics["optimizer_step_count"] == 4.0
+    assert metrics["kl_early_stopped"] == 0.0
+    assert metrics["maximum_approximate_kl"] >= metrics["approximate_kl"]
     assert all(math.isfinite(value) for value in metrics.values())
