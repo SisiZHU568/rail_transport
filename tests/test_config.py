@@ -25,6 +25,22 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["training"]["iterations"] > 0
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
+    assert config["dppo"]["training"]["normalize_advantages"] is True
+    stability = config["dppo"]["stability"]
+    assert stability == {
+        "training_sampling_min_std": 0.01,
+        "probability_min_std": 0.10,
+        "evaluation_sampling_min_std": 0.001,
+        "target_kl": 1.0,
+        "target_clip_fraction_min": 0.10,
+        "target_clip_fraction_max": 0.20,
+        "clip_ratio_candidates": [0.10, 0.01, 0.001],
+        "calibration_iterations": 3,
+        "calibration_episodes_per_iteration": 2,
+        "calibration_seed_start": 20000,
+    }
+    assert config["dppo"]["training"]["seed"] == 13000
+    assert 20000 <= stability["calibration_seed_start"] < 30000
 
 
 def test_validate_config_rejects_dataset_fractions_not_summing_to_one() -> None:

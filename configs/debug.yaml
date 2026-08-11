@@ -610,7 +610,28 @@ dppo:
     batch_size: 64
     update_epochs: 10
     gradient_clip_norm: 5.0
+    # 每个小批次统一标准化优势，避免不同 Episode 的回报尺度影响 PPO 更新。
+    normalize_advantages: true
     # Rollout 顺序、价值网络初始化和小批次打乱使用同一个实验种子。
     seed: 13000
     device: cpu
     output_root: results/dppo/training
+
+  stability:
+    # 训练采样保留适度探索噪声；概率重算使用更保守的标准差下限，
+    # 评估采样只保留极小随机性，三者用途不同，不能共用一个 std。
+    training_sampling_min_std: 0.01
+    probability_min_std: 0.10
+    evaluation_sampling_min_std: 0.001
+    target_kl: 1.0
+    target_clip_fraction_min: 0.10
+    target_clip_fraction_max: 0.20
+    clip_ratio_candidates:
+      - 0.10
+      - 0.01
+      - 0.001
+    calibration_iterations: 3
+    calibration_episodes_per_iteration: 2
+    # 随机种子按用途隔离：在线训练从 13000 开始，校准从 20000 开始，
+    # 后续独立评估使用 30000 及以上，防止轨迹在不同阶段意外复用。
+    calibration_seed_start: 20000
