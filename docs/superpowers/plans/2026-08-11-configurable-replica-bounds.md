@@ -19,6 +19,7 @@
 - `src/dppo_projection.py`: remove the `(2, 3)` validation and accept any positive count no larger than the scenario node count.
 - `src/sfc_deployment_intent.py`: remove the downstream 1/2/3 guard while retaining positive-integer and node-count consistency checks.
 - `src/dppo_scenario.py`: construct the action space from the two new configuration fields.
+- `src/dppo_slow_timescale_env.py`, `src/dppo_state_encoder.py`: normalize replica history by the configured maximum and version the changed state meaning as `dppo-v2-flat`.
 - `src/dppo_checkpoint.py`: bind the replica interval into checkpoint compatibility metadata.
 - `src/dppo_dataset.py`: mark newly generated expert actions with the v2 action schema so v1 datasets are not reused silently.
 - `run_dppo_pretraining.py`, `run_dppo_training.py`, `run_dppo_evaluation.py`: construct the new metadata fields.

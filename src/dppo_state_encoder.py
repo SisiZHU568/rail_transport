@@ -9,13 +9,13 @@ from src.scenario_dimensions import ScenarioDimensions
 
 
 # 状态维度相同并不代表语义相同，数据集和检查点还必须核对这个版本。
-DPPO_STATE_SCHEMA_VERSION = "dppo-v1-flat"
+DPPO_STATE_SCHEMA_VERSION = "dppo-v2-flat"
 
 
-# 最后 11 维的顺序属于公开状态模式 ``dppo-v1-flat``，不能随意调整。
+# 最后 11 维的顺序属于公开状态模式 ``dppo-v2-flat``，不能随意调整。
 DPPO_HISTORY_FEATURE_NAMES = (
     "previous_mean_replica_count",
-    "previous_three_replica_ratio",
+    "previous_maximum_replica_ratio",
     "previous_primary_retention_ratio",
     "previous_backup_retention_ratio",
     "previous_projection_change_ratio",
@@ -131,12 +131,12 @@ class DPPOStateSnapshot:
 class DPPOHistoryObservation:
     """保存上一慢窗口动作质量和执行结果对应的 11 项历史特征。
 
-    ``previous_mean_replica_count`` 保存“平均副本数除以最大副本数 3”的结果，
-    因而与其余比例一样位于 ``[0, 1]``。
+    ``previous_mean_replica_count`` 保存“平均副本数除以配置上限”的结果；
+    ``previous_maximum_replica_ratio`` 保存采用配置上限的 VNF 比例。
     """
 
     previous_mean_replica_count: float
-    previous_three_replica_ratio: float
+    previous_maximum_replica_ratio: float
     previous_primary_retention_ratio: float
     previous_backup_retention_ratio: float
     previous_projection_change_ratio: float

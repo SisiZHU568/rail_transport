@@ -35,7 +35,7 @@ def _metadata() -> DPPOCheckpointMetadata:
     """返回小规模检查点使用的完整兼容性元数据。"""
 
     return DPPOCheckpointMetadata(
-        state_schema_version="dppo-v1-flat",
+        state_schema_version="dppo-v2-flat",
         action_schema_version="joint-sfc-continuous-v2",
         state_dim=58,
         action_dim=14,

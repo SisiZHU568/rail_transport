@@ -595,7 +595,8 @@ dppo:
     output_root: results/dppo/pretraining
 
   training:
-    state_schema_version: dppo-v1-flat
+    # v2 将历史“三副本比例”改为“配置上限副本比例”。
+    state_schema_version: dppo-v2-flat
     # 在线训练的外层迭代次数和每次迭代收集的完整 Episode 数量。
     iterations: 200
     episodes_per_iteration: 8

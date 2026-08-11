@@ -8,6 +8,7 @@ import pytest
 from src.config import load_config
 from src.dppo_projection import ProjectionResult
 from src.dppo_scenario import build_dppo_environment
+from src.dppo_teacher import build_simulation_teacher
 
 
 class CountingFastExecutor:
@@ -139,3 +140,24 @@ def test_future_request_changes_do_not_change_current_state() -> None:
     second_state = second_environment.reset(seed=123)
 
     np.testing.assert_array_equal(first_state, second_state)
+
+
+def test_five_replica_action_completes_one_slow_timescale_step() -> None:
+    """扩展副本上限后，执行历史仍须按配置上限归一化并生成下一状态。"""
+
+    config = load_config("configs/debug.yaml")
+    config["dppo"]["action"]["maximum_replicas"] = 5
+    environment = build_dppo_environment(config)
+    environment.reset(seed=123)
+    proposal = build_simulation_teacher("reliability", environment).propose(
+        environment.current_public_snapshot()
+    )
+
+    next_state, _, _, _, info = environment.step(proposal.relaxed_action)
+
+    assert {
+        action.replica_count
+        for action in proposal.decoded_action.function_actions
+    } == {5}
+    assert np.isfinite(next_state).all()
+    assert info["next_observation"].shape == next_state.shape

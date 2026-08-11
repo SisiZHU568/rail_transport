@@ -28,6 +28,7 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["training"]["iterations"] > 0
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
+    assert config["dppo"]["training"]["state_schema_version"] == "dppo-v2-flat"
     assert config["dppo"]["training"]["normalize_advantages"] is True
     assert config["dppo"]["training"]["policy_learning_rate"] == 0.0001
     assert config["dppo"]["training"]["clip_ratio_base"] == 0.001

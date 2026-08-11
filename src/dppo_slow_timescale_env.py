@@ -135,11 +135,15 @@ class DPPOSlowTimescaleEnvironment:
 
         actions = decoded_action.function_actions
         function_count = len(actions)
+        maximum_replicas = self.action_space.maximum_replicas
         mean_replica_ratio = (
-            sum(action.replica_count for action in actions) / function_count / 3.0
+            sum(action.replica_count for action in actions)
+            / function_count
+            / maximum_replicas
         )
-        three_replica_ratio = (
-            sum(action.replica_count == 3 for action in actions) / function_count
+        maximum_replica_ratio = (
+            sum(action.replica_count == maximum_replicas for action in actions)
+            / function_count
         )
         maximum_retention = self.action_space.maximum_retention_seconds
         primary_retention_ratio = (
@@ -161,7 +165,7 @@ class DPPOSlowTimescaleEnvironment:
         )
         return DPPOHistoryObservation(
             previous_mean_replica_count=mean_replica_ratio,
-            previous_three_replica_ratio=three_replica_ratio,
+            previous_maximum_replica_ratio=maximum_replica_ratio,
             previous_primary_retention_ratio=primary_retention_ratio,
             previous_backup_retention_ratio=backup_retention_ratio,
             previous_projection_change_ratio=projection.change_ratio,

@@ -22,7 +22,7 @@ from src.scenario_dimensions import ScenarioDimensions
 def test_state_schema_version_is_explicit() -> None:
     """数据集和检查点必须共享同一状态版本，不能只凭相同维度判断兼容。"""
 
-    assert DPPO_STATE_SCHEMA_VERSION == "dppo-v1-flat"
+    assert DPPO_STATE_SCHEMA_VERSION == "dppo-v2-flat"
 
 
 @pytest.mark.parametrize(
@@ -60,7 +60,7 @@ def test_history_features_have_locked_dppo_order() -> None:
     dimensions = ScenarioDimensions((0, 1, 2), 3, (0, 1))
     history = DPPOHistoryObservation(
         previous_mean_replica_count=2.5 / 3.0,
-        previous_three_replica_ratio=0.25,
+        previous_maximum_replica_ratio=0.25,
         previous_primary_retention_ratio=0.30,
         previous_backup_retention_ratio=0.20,
         previous_projection_change_ratio=0.10,

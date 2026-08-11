@@ -91,7 +91,7 @@ def _metadata(environment, agent: DPPOAgent) -> DPPOCheckpointMetadata:
 
     dimensions = environment.dimensions
     return DPPOCheckpointMetadata(
-        state_schema_version="dppo-v1-flat",
+        state_schema_version="dppo-v2-flat",
         action_schema_version="joint-sfc-continuous-v2",
         state_dim=dimensions.state_dim,
         action_dim=dimensions.action_dim,
