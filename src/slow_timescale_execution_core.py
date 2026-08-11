@@ -108,6 +108,9 @@ class SlowWindowExecution:
     rejection_reasons: tuple[str, ...]
     final_candidate_map: dict[int, tuple[int, ...]] | None
     last_fast_result: FastSlotExecutionResult | None
+    # 论文分位数和可靠性统计必须使用原始快时隙样本，不能从窗口均值反推。
+    fast_slot_delay_samples_ms: tuple[float, ...]
+    exact_sfc_reliability_samples: tuple[float, ...]
 
 
 @dataclass
@@ -690,6 +693,8 @@ class SlowTimescaleExecutionCore:
                 None if last_result is None else dict(last_result.function_replica_node_ids)
             ),
             last_fast_result=last_result,
+            fast_slot_delay_samples_ms=tuple(accumulator.successful_delays_ms),
+            exact_sfc_reliability_samples=tuple(accumulator.exact_reliabilities),
         )
 
     def advance_rejected_window(
@@ -744,4 +749,6 @@ class SlowTimescaleExecutionCore:
             rejection_reasons=tuple(reasons),
             final_candidate_map=None,
             last_fast_result=None,
+            fast_slot_delay_samples_ms=(),
+            exact_sfc_reliability_samples=(),
         )

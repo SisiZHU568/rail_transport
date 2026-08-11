@@ -226,6 +226,11 @@ class DPPOSlowTimescaleEnvironment:
             "fast_repair_attempts": execution.metrics.fast_repair_attempts,
             "fast_repair_successes": execution.metrics.fast_repair_successes,
             "fast_repair_failures": execution.metrics.fast_repair_failures,
+            # 评估层需要原始样本计算 P95/P99；训练奖励仍使用原有窗口指标。
+            "fast_slot_delay_samples_ms": execution.fast_slot_delay_samples_ms,
+            "exact_sfc_reliability_samples": (
+                execution.exact_sfc_reliability_samples
+            ),
             "reward_breakdown": execution.reward_breakdown,
             "next_observation": next_state.copy(),
             "window_start_slot": execution.window_start_slot,

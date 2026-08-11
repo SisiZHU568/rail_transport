@@ -1272,7 +1272,7 @@ git commit -m "feat: train DPPO in the slow-timescale environment"
 - Create: `tests/test_dppo_evaluation.py`
 - Create: `run_dppo_evaluation.py`
 
-- [ ] **Step 1: Write failing evaluation-schema tests**
+- [x] **Step 1: Write failing evaluation-schema tests**
 
 Require episode and summary rows to include success/SLA, mean/peak/P95/P99 delay, reliability, cold starts, active memory, cloud rate, per-VNF replica counts, primary/backup retention, raw feasibility, projection change, repair attempts/success/failure, rejection, run/route/cold/total costs, sample count, standard deviation, and confidence interval.
 
@@ -1295,11 +1295,11 @@ def test_evaluation_schema_contains_required_metrics() -> None:
     )
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_evaluation.py`; expect missing evaluation module.
 
-- [ ] **Step 3: Implement evaluator and isolated CLI**
+- [x] **Step 3: Implement evaluator and isolated CLI**
 
 Evaluate fixed Episode seeds without gradient, aggregate raw fast-slot delay samples before percentiles, and produce UTF-8-SIG CSV. CLI accepts `--checkpoint`, `--episodes`, `--seed-start`, `--output-root`, and `--device`; output action/retention distributions separately from performance summaries.
 
@@ -1322,11 +1322,11 @@ def evaluate_dppo_episode(
         return _run_evaluation_episode(environment, agent, episode_seed)
 ```
 
-- [ ] **Step 4: Run tests and two-Episode temporary evaluation**
+- [x] **Step 4: Run tests and two-Episode temporary evaluation**
 
 Expected: structured CSV/PNG artifacts under the temporary root and no legacy action-ratio fields.
 
-- [ ] **Step 5: Commit evaluation**
+- [x] **Step 5: Commit evaluation**
 
 ```powershell
 git add src/dppo_evaluation.py tests/test_dppo_evaluation.py run_dppo_evaluation.py
