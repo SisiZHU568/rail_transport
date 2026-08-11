@@ -3,10 +3,12 @@
 import csv
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
 
+import run_dppo_training
 from run_dppo_training import collect_rollout, train_dppo
 from src.config import load_config
 from src.dppo import DPPOAgent, DPPOConfig, DPPORolloutBuffer
@@ -250,3 +252,57 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
         device="cpu",
     )
     assert loaded.iteration == 0
+
+
+def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """接入 profile 前，旧训练入口仍显式把 YAML clip_ratio 交给唯一 builder。"""
+
+    config = load_config("configs/debug.yaml")
+    built_config = object()
+    observed: list[tuple[dict, float]] = []
+    environment = SimpleNamespace(dimensions=SimpleNamespace(state_dim=3, action_dim=2))
+    agent = SimpleNamespace(frozen_denoising_steps=2, trainable_denoising_steps=2)
+
+    monkeypatch.setattr(run_dppo_training, "load_config", lambda _path: config)
+    monkeypatch.setattr(run_dppo_training, "build_dppo_environment", lambda _config: environment)
+    monkeypatch.setattr(
+        run_dppo_training,
+        "_checkpoint_metadata",
+        lambda *_args: SimpleNamespace(diffusion_steps=4),
+    )
+    monkeypatch.setattr(
+        run_dppo_training,
+        "load_dppo_checkpoint",
+        lambda *_args, **_kwargs: SimpleNamespace(model=object()),
+    )
+    monkeypatch.setattr(run_dppo_training, "CosineNoiseSchedule", lambda steps: steps)
+    monkeypatch.setattr(run_dppo_training, "DPPOAgent", lambda *_args, **_kwargs: agent)
+    monkeypatch.setattr(run_dppo_training, "train_dppo", lambda *_args, **_kwargs: ())
+    monkeypatch.setattr(
+        run_dppo_training,
+        "load_dppo_online_checkpoint",
+        lambda *_args, **_kwargs: SimpleNamespace(iteration=0, best_mean_reward=0.0),
+    )
+
+    def fake_builder(actual_config, *, clip_ratio):
+        observed.append((actual_config, clip_ratio))
+        return built_config
+
+    monkeypatch.setattr(run_dppo_training, "build_dppo_agent_config", fake_builder)
+
+    run_dppo_training.main(
+        [
+            "--pretrained-checkpoint",
+            str(tmp_path / "pretrained.pt"),
+            "--output-root",
+            str(tmp_path / "output"),
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert not hasattr(run_dppo_training, "_agent_config")
+    assert observed == [(config, float(config["dppo"]["training"]["clip_ratio"]))]

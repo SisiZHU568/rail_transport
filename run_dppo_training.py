@@ -13,7 +13,6 @@ import numpy as np
 from src.config import load_config
 from src.dppo import (
     DPPOAgent,
-    DPPOConfig,
     DPPORolloutBuffer,
     DPPORolloutTransition,
 )
@@ -28,6 +27,7 @@ from src.dppo_dataset import compute_config_hash
 from src.dppo_diffusion import CosineNoiseSchedule
 from src.dppo_scenario import build_dppo_environment
 from src.dppo_slow_timescale_env import DPPOSlowTimescaleEnvironment
+from src.dppo_training_config import build_dppo_agent_config
 
 
 TRAINING_HISTORY_COLUMNS = (
@@ -113,30 +113,6 @@ def _checkpoint_metadata(
         ),
         replica_threshold=float(action_config["replica_threshold"]),
         config_hash=compute_config_hash(config),
-    )
-
-
-def _agent_config(config: dict[str, Any]) -> DPPOConfig:
-    """把 YAML 参数转换成经过 DPPOConfig 二次校验的在线训练配置。"""
-
-    training = config["dppo"]["training"]
-    diffusion = config["dppo"]["diffusion"]
-    return DPPOConfig(
-        gamma=float(training["gamma"]),
-        gae_lambda=float(training["gae_lambda"]),
-        clip_ratio=float(training["clip_ratio"]),
-        denoising_discount=float(training["denoising_discount"]),
-        policy_learning_rate=float(training["policy_learning_rate"]),
-        value_learning_rate=float(training["value_learning_rate"]),
-        batch_size=int(training["batch_size"]),
-        update_epochs=int(training["update_epochs"]),
-        gradient_clip_norm=float(training["gradient_clip_norm"]),
-        diffusion_steps=int(diffusion["steps"]),
-        fine_tuned_steps=int(diffusion["fine_tuned_steps"]),
-        value_hidden_dims=tuple(
-            int(width) for width in training["value_hidden_dims"]
-        ),
-        seed=int(training["seed"]),
     )
 
 
@@ -396,7 +372,10 @@ def main(arguments: Sequence[str] | None = None) -> None:
     agent = DPPOAgent(
         pretrained.model,
         CosineNoiseSchedule(metadata.diffusion_steps),
-        _agent_config(config),
+        build_dppo_agent_config(
+            config,
+            clip_ratio=float(training["clip_ratio"]),
+        ),
         device=device,
     )
     print(
