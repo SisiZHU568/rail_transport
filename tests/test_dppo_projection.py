@@ -54,7 +54,12 @@ def test_projection_skips_failed_nodes_and_spreads_fault_domains() -> None:
     """最高分节点故障时应顺延，并优先把副本放到不同故障域。"""
 
     dimensions = ScenarioDimensions(tuple(range(5)), 5, (0,))
-    action_space = DPPOActionSpace(dimensions, maximum_retention_seconds=20.0)
+    action_space = DPPOActionSpace(
+        dimensions,
+        maximum_retention_seconds=20.0,
+        minimum_replicas=2,
+        maximum_replicas=3,
+    )
     raw_action = np.zeros(dimensions.action_dim, dtype=np.float32)
     raw_action[:6] = np.asarray([1.0, 0.8, 0.6, 0.4, 0.2, 0.0])
     free_cpu, free_memory_mb = _uniform_resources(dimensions.compute_node_ids)
@@ -267,3 +272,34 @@ def test_function_intent_rejects_duplicate_or_mismatched_nodes() -> None:
         FunctionDeploymentIntent(0, (1, 1), 2, 1.0, 1.0)
     with pytest.raises(ValueError, match="replica_count"):
         FunctionDeploymentIntent(0, (1, 2), 3, 1.0, 1.0)
+
+
+def test_projector_accepts_four_replica_action_when_nodes_are_available() -> None:
+    """快层投影器应接受配置扩展后的四副本动作。"""
+
+    dimensions = ScenarioDimensions(tuple(range(5)), 5, (0,))
+    decoded = _decoded_action(
+        (0,),
+        dimensions.compute_node_ids,
+        replica_count=4,
+    )
+    projector = DPPOProjector(
+        dimensions=dimensions,
+        resource_demands={0: ProjectionResourceDemand(cpu=1.0, memory_mb=64.0)},
+        minimum_distinct_fault_domains=2,
+    )
+    free_cpu, free_memory_mb = _uniform_resources(dimensions.compute_node_ids)
+
+    result = projector.project(
+        decoded_action=decoded,
+        operational_node_ids=frozenset(dimensions.compute_node_ids),
+        free_cpu=free_cpu,
+        free_memory_mb=free_memory_mb,
+        fault_domains={
+            node_id: node_id for node_id in dimensions.compute_node_ids
+        },
+    )
+
+    assert result.success is True
+    assert result.function_intents is not None
+    assert result.function_intents[0].replica_count == 4

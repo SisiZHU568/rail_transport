@@ -396,8 +396,17 @@ class DPPOProjector:
                 raise ValueError(
                     "each node ranking must contain every compute node exactly once."
                 )
-            if action.replica_count not in (2, 3):
-                raise ValueError("replica_count must be either 2 or 3.")
+            if (
+                isinstance(action.replica_count, bool)
+                or not isinstance(action.replica_count, int)
+                or not 1
+                <= action.replica_count
+                <= self.dimensions.compute_node_count
+            ):
+                raise ValueError(
+                    "replica_count must be a positive integer no greater "
+                    "than compute_node_count."
+                )
             for retention in (
                 action.primary_retention_seconds,
                 action.backup_retention_seconds,

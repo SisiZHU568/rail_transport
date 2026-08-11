@@ -58,7 +58,6 @@ class SimulationTeacher:
     """仿真教师基类：只把当前公开快照转换成确定性联合动作。"""
 
     teacher_name = "base"
-    replica_count = 2
 
     def __init__(self, context: SimulationTeacherContext) -> None:
         self.context = context
@@ -69,11 +68,12 @@ class SimulationTeacher:
         self._validate_snapshot(snapshot)
         ranking = self._rank_nodes(snapshot.node_observations)
         primary_retention, backup_retention = self._retention_seconds(snapshot)
+        replica_count = self._replica_count()
         function_actions = tuple(
             DecodedFunctionAction(
                 function_id=function_id,
                 ranked_node_ids=ranking,
-                replica_count=self.replica_count,
+                replica_count=replica_count,
                 primary_retention_seconds=primary_retention,
                 backup_retention_seconds=backup_retention,
             )
@@ -89,6 +89,11 @@ class SimulationTeacher:
             relaxed_action=relaxed_action,
             decoded_action=decoded_action,
         )
+
+    def _replica_count(self) -> int:
+        """成本型基准使用配置允许的最少副本。"""
+
+        return self.context.action_space.minimum_replicas
 
     def _validate_snapshot(self, snapshot: DPPOStateSnapshot) -> None:
         """拒绝错规模或乱序快照，避免训练标签与状态模式错位。"""
@@ -149,6 +154,7 @@ class SimulationTeacher:
     def _diverse_prefix(
         self,
         ordered_observations: Sequence[DPPONodeObservation],
+        replica_count: int,
     ) -> tuple[int, ...]:
         """在保留基础优先级的同时，让副本前缀尽量跨故障域。"""
 
@@ -157,7 +163,7 @@ class SimulationTeacher:
         used_domains: set[int] = set()
         # 第一轮只选不同故障域，保证可靠性约束优先于后续成本排序。
         for item in ordered_observations:
-            if len(selected) >= self.replica_count:
+            if len(selected) >= replica_count:
                 break
             domain_id = fault_domains[item.node_id]
             if item.operational and domain_id not in used_domains:
@@ -175,7 +181,6 @@ class CostTeacher(SimulationTeacher):
     """偏向低时延、低云成本和较少副本的启发式教师。"""
 
     teacher_name = "cost"
-    replica_count = 2
 
     def _rank_nodes(
         self,
@@ -197,14 +202,18 @@ class ReliabilityTeacher(SimulationTeacher):
     """偏向低故障风险、跨故障域和长保留时间的启发式教师。"""
 
     teacher_name = "reliability"
-    replica_count = 3
+
+    def _replica_count(self) -> int:
+        """可靠性教师使用配置允许的最多副本。"""
+
+        return self.context.action_space.maximum_replicas
 
     def _rank_nodes(
         self,
         observations: tuple[DPPONodeObservation, ...],
     ) -> tuple[int, ...]:
         ordered = sorted(observations, key=self._reliability_key)
-        return self._diverse_prefix(ordered)
+        return self._diverse_prefix(ordered, self._replica_count())
 
     def _retention_seconds(
         self,
@@ -215,17 +224,25 @@ class ReliabilityTeacher(SimulationTeacher):
 
 
 class BalancedTeacher(SimulationTeacher):
-    """先满足三副本跨域要求，再按边缘成本排序的启发式教师。"""
+    """在最低副本数上增加一档，再按边缘成本排序的启发式教师。"""
 
     teacher_name = "balanced"
-    replica_count = 3
+
+    def _replica_count(self) -> int:
+        """平衡教师采用低成本与高可靠之间的下一档副本数。"""
+
+        action_space = self.context.action_space
+        return min(
+            action_space.minimum_replicas + 1,
+            action_space.maximum_replicas,
+        )
 
     def _rank_nodes(
         self,
         observations: tuple[DPPONodeObservation, ...],
     ) -> tuple[int, ...]:
         ordered = sorted(observations, key=self._cost_key)
-        return self._diverse_prefix(ordered)
+        return self._diverse_prefix(ordered, self._replica_count())
 
     def _retention_seconds(
         self,

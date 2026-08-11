@@ -135,3 +135,22 @@ def test_unknown_teacher_name_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="未知的仿真教师"):
         build_simulation_teacher("unknown", scenario)
+
+
+def test_teachers_derive_replica_count_from_configured_bounds() -> None:
+    """三类教师从同一配置区间派生低、中、高副本策略。"""
+
+    config = load_config("configs/debug.yaml")
+    config["dppo"]["action"]["minimum_replicas"] = 2
+    config["dppo"]["action"]["maximum_replicas"] = 5
+    scenario = build_dppo_scenario(config)
+    scenario.reset(seed=123)
+    snapshot = scenario.current_public_snapshot()
+    expected_counts = {"cost": 2, "balanced": 3, "reliability": 5}
+
+    for teacher_name, expected_count in expected_counts.items():
+        proposal = build_simulation_teacher(teacher_name, scenario).propose(snapshot)
+        assert {
+            item.replica_count
+            for item in proposal.decoded_action.function_actions
+        } == {expected_count}

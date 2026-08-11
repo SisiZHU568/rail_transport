@@ -17,6 +17,7 @@
 - `src/dppo_action_space.py`: quantize one continuous score into any configured integer interval and encode teachers at bin centers.
 - `src/dppo_teacher.py`: derive cost/reliability/balanced teacher counts from the action space.
 - `src/dppo_projection.py`: remove the `(2, 3)` validation and accept any positive count no larger than the scenario node count.
+- `src/sfc_deployment_intent.py`: remove the downstream 1/2/3 guard while retaining positive-integer and node-count consistency checks.
 - `src/dppo_scenario.py`: construct the action space from the two new configuration fields.
 - `src/dppo_checkpoint.py`: bind the replica interval into checkpoint compatibility metadata.
 - `run_dppo_pretraining.py`, `run_dppo_training.py`, `run_dppo_evaluation.py`: construct the new metadata fields.
@@ -176,6 +177,7 @@ D:\Git\cmd\git.exe commit -m "feat: configure DPPO replica count bounds"
 **Files:**
 - Modify: `src/dppo_teacher.py`
 - Modify: `src/dppo_projection.py`
+- Modify: `src/sfc_deployment_intent.py`
 - Modify: `src/dppo_scenario.py`
 - Test: `tests/test_dppo_teacher.py`
 - Test: `tests/test_dppo_projection.py`
