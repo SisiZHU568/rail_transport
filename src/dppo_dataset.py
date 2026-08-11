@@ -117,7 +117,7 @@ class ExpertDatasetMetadata:
     action_dim: int
     config_hash: str
     state_schema_version: str = DPPO_STATE_SCHEMA_VERSION
-    action_schema_version: str = "joint-sfc-continuous-v1"
+    action_schema_version: str = "joint-sfc-continuous-v2"
 
     def __post_init__(self) -> None:
         """在写盘前验证版本、维度和配置指纹。"""

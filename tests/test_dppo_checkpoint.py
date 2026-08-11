@@ -36,7 +36,7 @@ def _metadata() -> DPPOCheckpointMetadata:
 
     return DPPOCheckpointMetadata(
         state_schema_version="dppo-v1-flat",
-        action_schema_version="joint-sfc-continuous-v1",
+        action_schema_version="joint-sfc-continuous-v2",
         state_dim=58,
         action_dim=14,
         mec_count=3,
@@ -45,7 +45,8 @@ def _metadata() -> DPPOCheckpointMetadata:
         diffusion_steps=20,
         fine_tuned_steps=5,
         maximum_retention_seconds=20.0,
-        replica_threshold=0.0,
+        minimum_replicas=2,
+        maximum_replicas=3,
         config_hash="test-hash",
     )
 
@@ -205,7 +206,8 @@ def test_checkpoint_rejects_every_incompatible_metadata_field(tmp_path) -> None:
         "diffusion_steps": 10,
         "fine_tuned_steps": 4,
         "maximum_retention_seconds": 30.0,
-        "replica_threshold": 0.25,
+        "minimum_replicas": 1,
+        "maximum_replicas": 4,
         "config_hash": "different-hash",
     }
 
@@ -219,6 +221,13 @@ def test_checkpoint_rejects_every_incompatible_metadata_field(tmp_path) -> None:
                 ),
                 device="cpu",
             )
+
+
+def test_checkpoint_metadata_rejects_replica_bounds_above_node_count() -> None:
+    """检查点自身也要拒绝无法部署到当前场景节点数的副本区间。"""
+
+    with pytest.raises(ValueError, match="maximum_replicas.*compute_node_count"):
+        replace(_metadata(), maximum_replicas=5)
 
 
 def test_checkpoint_restores_saved_torch_rng_state(tmp_path) -> None:

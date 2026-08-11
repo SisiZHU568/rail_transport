@@ -139,6 +139,7 @@ def test_save_load_preserves_arrays_and_schema_versions(tmp_path) -> None:
     loaded = load_expert_dataset(tmp_path, expected_metadata=metadata)
 
     assert loaded.metadata == metadata
+    assert loaded.metadata.action_schema_version == "joint-sfc-continuous-v2"
     assert loaded.partitions["train"] == (first, second)
     for expected, actual in zip(
         (first, second),

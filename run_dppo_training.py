@@ -132,7 +132,8 @@ def _checkpoint_metadata(
         maximum_retention_seconds=float(
             action_config["maximum_retention_seconds"]
         ),
-        replica_threshold=float(action_config["replica_threshold"]),
+        minimum_replicas=int(action_config["minimum_replicas"]),
+        maximum_replicas=int(action_config["maximum_replicas"]),
         config_hash=compute_config_hash(config),
     )
 

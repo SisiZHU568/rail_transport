@@ -35,7 +35,8 @@ class DPPOCheckpointMetadata:
     diffusion_steps: int
     fine_tuned_steps: int
     maximum_retention_seconds: float
-    replica_threshold: float
+    minimum_replicas: int
+    maximum_replicas: int
     config_hash: str
 
     def __post_init__(self) -> None:
@@ -56,6 +57,8 @@ class DPPOCheckpointMetadata:
             "function_count",
             "diffusion_steps",
             "fine_tuned_steps",
+            "minimum_replicas",
+            "maximum_replicas",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
@@ -65,11 +68,11 @@ class DPPOCheckpointMetadata:
         retention = float(self.maximum_retention_seconds)
         if not math.isfinite(retention) or retention <= 0.0:
             raise ValueError("maximum_retention_seconds 必须是正有限数。")
-        threshold = float(self.replica_threshold)
-        if not math.isfinite(threshold) or not -1.0 < threshold <= 1.0:
-            raise ValueError("replica_threshold 必须位于 (-1, 1]。")
+        if self.minimum_replicas > self.maximum_replicas:
+            raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
+        if self.maximum_replicas > self.compute_node_count:
+            raise ValueError("maximum_replicas 不能大于 compute_node_count。")
         object.__setattr__(self, "maximum_retention_seconds", retention)
-        object.__setattr__(self, "replica_threshold", threshold)
 
 
 @dataclass(frozen=True)

@@ -92,7 +92,7 @@ def _metadata(environment, agent: DPPOAgent) -> DPPOCheckpointMetadata:
     dimensions = environment.dimensions
     return DPPOCheckpointMetadata(
         state_schema_version="dppo-v1-flat",
-        action_schema_version="joint-sfc-continuous-v1",
+        action_schema_version="joint-sfc-continuous-v2",
         state_dim=dimensions.state_dim,
         action_dim=dimensions.action_dim,
         mec_count=dimensions.mec_count,
@@ -101,7 +101,8 @@ def _metadata(environment, agent: DPPOAgent) -> DPPOCheckpointMetadata:
         diffusion_steps=agent.config.diffusion_steps,
         fine_tuned_steps=agent.config.fine_tuned_steps,
         maximum_retention_seconds=20.0,
-        replica_threshold=0.0,
+        minimum_replicas=2,
+        maximum_replicas=3,
         config_hash="online-training-test",
     )
 
