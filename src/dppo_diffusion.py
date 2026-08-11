@@ -166,9 +166,18 @@ class CosineNoiseSchedule:
             noisy_actions,
         )
         # 最后一个去噪步的理论方差为零；先在方差空间设置正下限，
-        # 再开方可明确保持“方差 -> 标准差”的计算顺序。
+        # 再开方可明确保持“方差 -> 标准差”的计算顺序。float16/bfloat16
+        # 可能把很小的下限平方舍入为零，因此临时提升精度再转回动作类型。
+        calculation_variances = (
+            variances.to(dtype=torch.float32)
+            if variances.dtype in {torch.float16, torch.bfloat16}
+            else variances
+        )
         minimum_variance = float(minimum_standard_deviation) ** 2
-        return variances.clamp_min(minimum_variance).sqrt().expand_as(noisy_actions)
+        standard_deviations = calculation_variances.clamp_min(
+            minimum_variance
+        ).sqrt()
+        return standard_deviations.to(dtype=noisy_actions.dtype).expand_as(noisy_actions)
 
 
 def sinusoidal_timestep_embedding(
