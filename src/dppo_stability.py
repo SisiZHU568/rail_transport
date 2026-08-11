@@ -291,6 +291,84 @@ class DPPOStabilityProfile:
         object.__setattr__(self, "selected_clip_ratio", selected)
         object.__setattr__(self, "failure_reasons", reasons)
 
+        # qualified、失败原因和最终选择都只是由原始指标推导出的缓存，
+        # profile 即使来自本地文件也不能信任这些持久化结论。
+        _verify_profile_integrity(self)
+
+
+def _verify_profile_integrity(profile: DPPOStabilityProfile) -> None:
+    """重算候选和 profile 派生结论，拒绝指标与结论不一致的篡改。"""
+
+    if not isinstance(profile.candidate_results, tuple) or any(
+        not isinstance(result, DPPOCalibrationCandidateResult)
+        for result in profile.candidate_results
+    ):
+        raise ValueError("稳定性配置完整性校验失败：候选结果结构无效。")
+    result_values = tuple(
+        result.clip_ratio for result in profile.candidate_results
+    )
+    if (
+        len(result_values) != len(set(result_values))
+        or set(result_values) != set(profile.candidate_values)
+    ):
+        raise ValueError(
+            "稳定性配置完整性校验失败：候选结果与候选配置不再一一对应。"
+        )
+
+    # DPPOStabilitySettings 的 seed_start 不参与候选资格公式；这里取首个已校验种子，
+    # 只为复用唯一的候选评估入口，避免复制两套阈值判断逻辑。
+    settings = DPPOStabilitySettings(
+        training_sampling_min_std=profile.training_sampling_min_std,
+        probability_min_std=profile.probability_min_std,
+        evaluation_sampling_min_std=profile.evaluation_sampling_min_std,
+        target_kl=profile.target_kl,
+        target_clip_fraction_min=profile.target_clip_fraction_min,
+        target_clip_fraction_max=profile.target_clip_fraction_max,
+        clip_ratio_candidates=profile.candidate_values,
+        calibration_iterations=profile.iterations_per_candidate,
+        calibration_episodes_per_iteration=profile.episodes_per_iteration,
+        calibration_seed_start=profile.episode_seeds[0],
+    )
+    recomputed_results = tuple(
+        evaluate_calibration_candidate(
+            clip_ratio=result.clip_ratio,
+            mean_clip_fraction=result.mean_clip_fraction,
+            mean_approximate_kl=result.mean_approximate_kl,
+            maximum_approximate_kl=result.maximum_approximate_kl,
+            optimizer_step_count=result.optimizer_step_count,
+            settings=settings,
+        )
+        for result in profile.candidate_results
+    )
+    for persisted, recomputed in zip(
+        profile.candidate_results,
+        recomputed_results,
+        strict=True,
+    ):
+        if persisted != recomputed:
+            raise ValueError(
+                "稳定性配置完整性校验失败："
+                f"候选 clip_ratio={persisted.clip_ratio} 的派生字段与原始指标不一致。"
+            )
+
+    qualified_values = tuple(
+        result.clip_ratio for result in recomputed_results if result.qualified
+    )
+    expected_selected = max(qualified_values) if qualified_values else None
+    expected_qualified = expected_selected is not None
+    expected_reasons = (
+        () if expected_qualified else ("没有候选项通过稳定性校准。",)
+    )
+    if (
+        profile.qualified != expected_qualified
+        or profile.selected_clip_ratio != expected_selected
+        or profile.failure_reasons != expected_reasons
+    ):
+        raise ValueError(
+            "稳定性配置完整性校验失败："
+            "profile 的 qualified、selected_clip_ratio 或 failure_reasons 与候选重算结果不一致。"
+        )
+
 
 def select_stability_profile(
     *,
@@ -531,6 +609,8 @@ def validate_stability_profile(
 
     if not isinstance(profile, DPPOStabilityProfile):
         raise ValueError("稳定性配置类型无效。")
+    # 再次独立重算，防止调用者通过 object.__setattr__ 绕过 frozen 数据类。
+    _verify_profile_integrity(profile)
     if not profile.qualified:
         raise ValueError("稳定性配置未通过校准，不能用于训练。")
     if profile.schema_version != STABILITY_PROFILE_SCHEMA_VERSION:

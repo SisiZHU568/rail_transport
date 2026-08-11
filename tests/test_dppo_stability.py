@@ -294,6 +294,112 @@ def test_profile_json_round_trip_digest_and_file_io_are_canonical(tmp_path) -> N
 
 
 @pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("maximum_approximate_kl", 99.0),
+        ("mean_clip_fraction", 0.99),
+    ],
+)
+def test_parser_rejects_metrics_tampered_without_updating_derived_fields(
+    tmp_path,
+    field,
+    value,
+) -> None:
+    profile, _ = _profile(tmp_path)
+    data = json.loads(stability_profile_json(profile))
+    selected = next(
+        item
+        for item in data["candidate_results"]
+        if item["clip_ratio"] == data["selected_clip_ratio"]
+    )
+    selected[field] = value
+
+    with pytest.raises(ValueError, match="完整性"):
+        parse_stability_profile_json(json.dumps(data))
+
+
+def test_parser_rejects_selected_ratio_that_is_not_largest_qualified(tmp_path) -> None:
+    profile, _ = _profile(tmp_path)
+    data = json.loads(stability_profile_json(profile))
+    data["selected_clip_ratio"] = 0.01
+
+    with pytest.raises(ValueError, match="完整性"):
+        parse_stability_profile_json(json.dumps(data))
+
+
+def test_parser_rejects_forged_candidate_qualified_flag(tmp_path) -> None:
+    profile, _ = _profile(tmp_path)
+    data = json.loads(stability_profile_json(profile))
+    candidate = next(
+        item for item in data["candidate_results"] if item["clip_ratio"] == 0.01
+    )
+    candidate["qualified"] = False
+
+    with pytest.raises(ValueError, match="完整性"):
+        parse_stability_profile_json(json.dumps(data))
+
+
+def test_parser_rejects_forged_candidate_finite_flag(tmp_path) -> None:
+    profile, _ = _profile(tmp_path)
+    data = json.loads(stability_profile_json(profile))
+    data["candidate_results"][0]["finite"] = False
+
+    with pytest.raises(ValueError):
+        parse_stability_profile_json(json.dumps(data))
+
+
+def test_parser_rejects_forged_candidate_failure_reasons(tmp_path) -> None:
+    profile = select_stability_profile(
+        config_hash="config-v1",
+        pretrained_checkpoint_sha256="a" * 64,
+        settings=_settings(),
+        episode_seeds=(20000, 20001),
+        candidate_results=(
+            _result(0.10, clip_fraction=0.01),
+            _result(0.01, clip_fraction=0.01),
+            _result(0.001, clip_fraction=0.01),
+        ),
+    )
+    data = json.loads(stability_profile_json(profile))
+    data["candidate_results"][0]["failure_reasons"] = ["伪造失败原因"]
+
+    with pytest.raises(ValueError, match="完整性"):
+        parse_stability_profile_json(json.dumps(data, ensure_ascii=False))
+
+
+def test_validate_profile_recomputes_integrity_after_in_memory_tampering(tmp_path) -> None:
+    profile, checkpoint = _profile(tmp_path)
+    selected = next(
+        item
+        for item in profile.candidate_results
+        if item.clip_ratio == profile.selected_clip_ratio
+    )
+    # 模拟绕过 frozen 数据类的恶意内存修改，验证训练入口仍会独立重算。
+    object.__setattr__(selected, "maximum_approximate_kl", 99.0)
+
+    with pytest.raises(ValueError, match="完整性"):
+        validate_stability_profile(
+            profile,
+            config_hash=profile.config_hash,
+            pretrained_checkpoint_path=checkpoint,
+            settings=_settings(),
+        )
+
+
+def test_validate_profile_rechecks_candidate_set_after_in_memory_tampering(tmp_path) -> None:
+    profile, checkpoint = _profile(tmp_path)
+    object.__setattr__(profile, "candidate_results", profile.candidate_results[:-1])
+
+    with pytest.raises(ValueError, match="完整性"):
+        validate_stability_profile(
+            profile,
+            config_hash=profile.config_hash,
+            pretrained_checkpoint_path=checkpoint,
+            settings=_settings(),
+        )
+
+
+@pytest.mark.parametrize(
     ("change", "message"),
     [
         ({"config_hash": "wrong"}, "配置哈希"),
@@ -307,11 +413,16 @@ def test_validate_profile_rejects_mismatches(tmp_path, change, message) -> None:
     if "checkpoint_contents" in change:
         checkpoint.write_bytes(change["checkpoint_contents"])
     if "qualified" in change:
-        profile = replace(
-            profile,
-            qualified=False,
-            selected_clip_ratio=None,
-            failure_reasons=("校准失败",),
+        profile = select_stability_profile(
+            config_hash=profile.config_hash,
+            pretrained_checkpoint_sha256=profile.pretrained_checkpoint_sha256,
+            settings=_settings(),
+            episode_seeds=profile.episode_seeds,
+            candidate_results=(
+                _result(0.10, clip_fraction=0.01),
+                _result(0.01, clip_fraction=0.01),
+                _result(0.001, clip_fraction=0.01),
+            ),
         )
 
     with pytest.raises(ValueError, match=message):
