@@ -13,6 +13,12 @@ from src.dppo_diffusion import (
     CosineNoiseSchedule,
     diffusion_noise_loss,
 )
+from src.dppo_stability import (
+    DPPOStabilityProfile,
+    parse_stability_profile_json,
+    stability_profile_json,
+    stability_profile_sha256,
+)
 
 
 @dataclass(frozen=True)
@@ -86,6 +92,49 @@ class LoadedDPPOOnlineCheckpoint:
     iteration: int
     best_mean_reward: float
     rng_state: torch.Tensor
+    stability_profile: DPPOStabilityProfile
+    stability_profile_sha256: str
+
+
+def _validate_profile_config_binding(
+    profile: DPPOStabilityProfile,
+    config: DPPOConfig,
+    metadata: DPPOCheckpointMetadata,
+) -> None:
+    """验证正式训练稳定性门禁与配置、场景身份保持严格绑定。"""
+
+    if not isinstance(profile, DPPOStabilityProfile):
+        raise TypeError("stability_profile 必须是 DPPOStabilityProfile。")
+    # 规范化往返会重新执行 profile 完整性校验，不能信任被内存篡改的 frozen 对象。
+    parse_stability_profile_json(stability_profile_json(profile))
+    if not profile.qualified or profile.selected_clip_ratio is None:
+        raise ValueError("稳定性配置未通过校准，不能用于正式训练检查点。")
+    if profile.config_hash != metadata.config_hash:
+        raise ValueError("稳定性配置 config_hash 与检查点元数据不一致。")
+    expected = {
+        "clip_ratio": profile.selected_clip_ratio,
+        "training_sampling_min_std": profile.training_sampling_min_std,
+        "probability_min_std": profile.probability_min_std,
+        "evaluation_sampling_min_std": profile.evaluation_sampling_min_std,
+        "target_kl": profile.target_kl,
+    }
+    for name, expected_value in expected.items():
+        if getattr(config, name) != expected_value:
+            raise ValueError(f"智能体配置 {name} 与稳定性配置不一致。")
+
+
+def validate_dppo_stability_binding(
+    agent: DPPOAgent,
+    metadata: DPPOCheckpointMetadata,
+    stability_profile: DPPOStabilityProfile,
+) -> None:
+    """在产生训练输出前统一验证 agent、metadata 与 profile 的绑定。"""
+
+    if not isinstance(agent, DPPOAgent):
+        raise TypeError("agent 必须是 DPPOAgent。")
+    if not isinstance(metadata, DPPOCheckpointMetadata):
+        raise TypeError("metadata 必须是 DPPOCheckpointMetadata。")
+    _validate_profile_config_binding(stability_profile, agent.config, metadata)
 
 
 def validate_checkpoint_metadata(
@@ -378,6 +427,7 @@ def save_dppo_online_checkpoint(
     *,
     iteration: int,
     best_mean_reward: float,
+    stability_profile: DPPOStabilityProfile,
 ) -> None:
     """保存可继续训练的完整 DDPO 双层策略、价值网络和优化器。"""
 
@@ -385,6 +435,7 @@ def save_dppo_online_checkpoint(
         raise TypeError("agent 必须是 DPPOAgent。")
     if not isinstance(metadata, DPPOCheckpointMetadata):
         raise TypeError("metadata 必须是 DPPOCheckpointMetadata。")
+    validate_dppo_stability_binding(agent, metadata, stability_profile)
     if agent.state_dim != metadata.state_dim or agent.action_dim != metadata.action_dim:
         raise ValueError("智能体维度与在线检查点元数据不一致。")
     if (
@@ -398,12 +449,17 @@ def save_dppo_online_checkpoint(
     if not math.isfinite(reward):
         raise ValueError("best_mean_reward 必须是有限数。")
 
+    profile_json = stability_profile_json(stability_profile)
+    profile_digest = stability_profile_sha256(stability_profile)
+
     path = Path(checkpoint_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "format_version": "dppo-online-checkpoint-v1",
+        "format_version": "dppo-online-checkpoint-v2",
         "metadata": asdict(metadata),
         "config": asdict(agent.config),
+        "stability_profile_json": profile_json,
+        "stability_profile_sha256": profile_digest,
         "model_hidden_dims": tuple(agent.frozen_policy.hidden_dims),
         # 固定前段和可训练末段必须分别保存，恢复后不能混成一个网络。
         "frozen_policy_state_dict": agent.frozen_policy.state_dict(),
@@ -435,7 +491,11 @@ def load_dppo_online_checkpoint(
         map_location=resolved_device,
         weights_only=True,
     )
-    if payload.get("format_version") != "dppo-online-checkpoint-v1":
+    format_version = payload.get("format_version")
+    if format_version == "dppo-online-checkpoint-v1":
+        # v1 没有校准 profile，无法证明恢复出的智能体符合正式训练稳定性门禁。
+        raise ValueError("在线检查点 v1 缺少正式训练稳定性绑定。")
+    if format_version != "dppo-online-checkpoint-v2":
         raise ValueError("在线检查点 format_version 不受支持。")
     actual = DPPOCheckpointMetadata(**payload["metadata"])
     validate_checkpoint_metadata(actual, expected)
@@ -445,6 +505,17 @@ def load_dppo_online_checkpoint(
         or config.fine_tuned_steps != actual.fine_tuned_steps
     ):
         raise ValueError("在线检查点配置与元数据的去噪步数不一致。")
+    serialized_profile = payload.get("stability_profile_json")
+    if not isinstance(serialized_profile, str):
+        raise ValueError("在线检查点缺少稳定性配置 JSON。")
+    profile = parse_stability_profile_json(serialized_profile)
+    if serialized_profile != stability_profile_json(profile):
+        raise ValueError("在线检查点稳定性配置 JSON 不是规范格式。")
+    stored_profile_digest = payload.get("stability_profile_sha256")
+    actual_profile_digest = stability_profile_sha256(profile)
+    if stored_profile_digest != actual_profile_digest:
+        raise ValueError("在线检查点稳定性配置 SHA256 不匹配。")
+    _validate_profile_config_binding(profile, config, actual)
 
     frozen_policy = ConditionalDiffusionMLP(
         actual.state_dim,
@@ -491,4 +562,6 @@ def load_dppo_online_checkpoint(
         iteration=iteration,
         best_mean_reward=best_mean_reward,
         rng_state=rng_state.clone(),
+        stability_profile=profile,
+        stability_profile_sha256=actual_profile_digest,
     )

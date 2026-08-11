@@ -5,15 +5,25 @@ from dataclasses import replace
 import pytest
 import torch
 
+from src.dppo import DPPOAgent, DPPOConfig
 from src.dppo_checkpoint import (
     DPPOCheckpointMetadata,
     evaluate_diffusion_loss,
     load_dppo_checkpoint,
+    load_dppo_online_checkpoint,
     pretrain_diffusion_epoch,
     resolve_torch_device,
     save_dppo_checkpoint,
+    save_dppo_online_checkpoint,
     seed_torch_for_pretraining,
 )
+from src.dppo_stability import (
+    evaluate_calibration_candidate,
+    select_stability_profile,
+    stability_profile_json,
+    stability_profile_sha256,
+)
+from src.dppo_training_config import DPPOStabilitySettings
 from src.dppo_diffusion import (
     ConditionalDiffusionMLP,
     CosineNoiseSchedule,
@@ -47,6 +57,59 @@ def _synthetic_expert_batch() -> tuple[torch.Tensor, torch.Tensor]:
     states = torch.randn((8, 58), generator=generator)
     actions = torch.tanh(torch.randn((8, 14), generator=generator))
     return states, actions
+
+
+def _online_agent() -> DPPOAgent:
+    model = ConditionalDiffusionMLP(58, 14, (16, 16))
+    return DPPOAgent(
+        model,
+        CosineNoiseSchedule(20),
+        DPPOConfig(
+            diffusion_steps=20,
+            fine_tuned_steps=5,
+            value_hidden_dims=(16, 16),
+            clip_ratio=0.1,
+            training_sampling_min_std=0.01,
+            probability_min_std=0.10,
+            evaluation_sampling_min_std=0.001,
+            target_kl=1.0,
+        ),
+        device="cpu",
+    )
+
+
+def _qualified_profile(
+    metadata: DPPOCheckpointMetadata,
+    *,
+    maximum_approximate_kl: float = 0.3,
+):
+    settings = DPPOStabilitySettings(
+        training_sampling_min_std=0.01,
+        probability_min_std=0.10,
+        evaluation_sampling_min_std=0.001,
+        target_kl=1.0,
+        target_clip_fraction_min=0.10,
+        target_clip_fraction_max=0.20,
+        clip_ratio_candidates=(0.10,),
+        calibration_iterations=1,
+        calibration_episodes_per_iteration=1,
+        calibration_seed_start=20000,
+    )
+    result = evaluate_calibration_candidate(
+        clip_ratio=0.10,
+        mean_clip_fraction=0.15,
+        mean_approximate_kl=0.2,
+        maximum_approximate_kl=maximum_approximate_kl,
+        optimizer_step_count=1,
+        settings=settings,
+    )
+    return select_stability_profile(
+        config_hash=metadata.config_hash,
+        pretrained_checkpoint_sha256="a" * 64,
+        settings=settings,
+        episode_seeds=(20000,),
+        candidate_results=(result,),
+    )
 
 
 def test_two_minibatches_train_and_checkpoint_round_trip(tmp_path) -> None:
@@ -236,3 +299,106 @@ def test_pretraining_cli_requires_dataset_and_output_roots() -> None:
     assert arguments.output_root == "temporary-checkpoint"
     assert arguments.epochs == 1
     assert arguments.device == "cpu"
+
+
+def test_online_checkpoint_v2_round_trip_binds_canonical_profile(tmp_path) -> None:
+    metadata = _metadata()
+    agent = _online_agent()
+    profile = _qualified_profile(metadata)
+    checkpoint_path = tmp_path / "online.pt"
+
+    save_dppo_online_checkpoint(
+        checkpoint_path,
+        agent,
+        metadata,
+        iteration=4,
+        best_mean_reward=1.25,
+        stability_profile=profile,
+    )
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    loaded = load_dppo_online_checkpoint(
+        checkpoint_path,
+        expected=metadata,
+        device="cpu",
+    )
+
+    assert payload["format_version"] == "dppo-online-checkpoint-v2"
+    assert payload["stability_profile_json"] == stability_profile_json(profile)
+    assert payload["stability_profile_sha256"] == stability_profile_sha256(profile)
+    assert loaded.stability_profile == profile
+    assert loaded.stability_profile_sha256 == stability_profile_sha256(profile)
+
+
+@pytest.mark.parametrize(
+    "tampered_field",
+    [
+        "json",
+        "digest",
+        "clip_ratio",
+        "training_sampling_min_std",
+        "probability_min_std",
+        "evaluation_sampling_min_std",
+        "target_kl",
+    ],
+)
+def test_online_checkpoint_rejects_profile_or_config_tampering(
+    tmp_path,
+    tampered_field,
+) -> None:
+    metadata = _metadata()
+    agent = _online_agent()
+    profile = _qualified_profile(metadata)
+    checkpoint_path = tmp_path / "online.pt"
+    save_dppo_online_checkpoint(
+        checkpoint_path,
+        agent,
+        metadata,
+        iteration=0,
+        best_mean_reward=0.0,
+        stability_profile=profile,
+    )
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    if tampered_field == "json":
+        payload["stability_profile_json"] += " "
+    elif tampered_field == "digest":
+        payload["stability_profile_sha256"] = "0" * 64
+    else:
+        payload["config"][tampered_field] = 0.5
+    torch.save(payload, checkpoint_path)
+
+    with pytest.raises(ValueError):
+        load_dppo_online_checkpoint(
+            checkpoint_path,
+            expected=metadata,
+            device="cpu",
+        )
+
+
+def test_online_checkpoint_rejects_v1_without_stability_binding(tmp_path) -> None:
+    checkpoint_path = tmp_path / "legacy.pt"
+    torch.save({"format_version": "dppo-online-checkpoint-v1"}, checkpoint_path)
+
+    with pytest.raises(ValueError, match="缺少正式训练稳定性绑定"):
+        load_dppo_online_checkpoint(
+            checkpoint_path,
+            expected=_metadata(),
+            device="cpu",
+        )
+
+
+def test_online_checkpoint_refuses_unqualified_profile_before_writing(tmp_path) -> None:
+    checkpoint_path = tmp_path / "online.pt"
+    profile = _qualified_profile(_metadata(), maximum_approximate_kl=1.0)
+    assert profile.qualified is False
+
+    with pytest.raises(ValueError, match="未通过"):
+        save_dppo_online_checkpoint(
+            checkpoint_path,
+            _online_agent(),
+            _metadata(),
+            iteration=0,
+            best_mean_reward=0.0,
+            stability_profile=profile,
+        )
+
+    assert not checkpoint_path.exists()

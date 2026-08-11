@@ -22,12 +22,23 @@ from src.dppo_checkpoint import (
     load_dppo_online_checkpoint,
     resolve_torch_device,
     save_dppo_online_checkpoint,
+    validate_dppo_stability_binding,
 )
 from src.dppo_dataset import compute_config_hash
 from src.dppo_diffusion import CosineNoiseSchedule
 from src.dppo_scenario import build_dppo_environment
 from src.dppo_slow_timescale_env import DPPOSlowTimescaleEnvironment
-from src.dppo_training_config import build_dppo_agent_config
+from src.dppo_stability import (
+    DPPOStabilityProfile,
+    load_stability_profile,
+    sha256_file,
+    stability_profile_sha256,
+    validate_stability_profile,
+)
+from src.dppo_training_config import (
+    build_dppo_agent_config,
+    load_dppo_stability_settings,
+)
 
 
 TRAINING_HISTORY_COLUMNS = (
@@ -43,7 +54,12 @@ TRAINING_HISTORY_COLUMNS = (
     "repair_success_rate",
     "gradient_norm",
     "approximate_kl",
+    "maximum_approximate_kl",
+    "optimizer_step_count",
+    "kl_early_stopped",
     "clip_fraction",
+    "selected_clip_ratio",
+    "stability_profile_sha256",
 )
 
 
@@ -74,6 +90,11 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
         "--pretrained-checkpoint",
         required=True,
         help="第 12 批生成的扩散预训练检查点。",
+    )
+    parser.add_argument(
+        "--stability-profile",
+        required=True,
+        help="校准通过且与当前配置、预训练检查点绑定的稳定性配置。",
     )
     parser.add_argument(
         "--output-root",
@@ -241,7 +262,7 @@ def _aggregate_rollout_metrics(
 
 def _write_training_history(
     history_path: Path,
-    history: Sequence[dict[str, float]],
+    history: Sequence[dict[str, float | str]],
 ) -> None:
     """用 Excel 友好的 UTF-8-SIG 编码覆盖写入当前完整训练历史。"""
 
@@ -261,7 +282,8 @@ def train_dppo(
     episodes_per_iteration: int,
     seed: int,
     output_root: str | Path,
-) -> tuple[dict[str, float], ...]:
+    stability_profile: DPPOStabilityProfile,
+) -> tuple[dict[str, float | str], ...]:
     """执行配置化在线训练，并保存 last/best 检查点及逐迭代 CSV。"""
 
     for name, value in (
@@ -272,13 +294,16 @@ def train_dppo(
             raise ValueError(f"{name} 必须是正整数。")
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("seed 必须是非负整数。")
+    # profile 是正式训练门禁；所有绑定检查必须先于输出目录创建。
+    validate_dppo_stability_binding(agent, metadata, stability_profile)
+    profile_digest = stability_profile_sha256(stability_profile)
     output_path = Path(output_root)
     output_path.mkdir(parents=True, exist_ok=True)
     last_checkpoint = output_path / "dppo_online_last.pt"
     best_checkpoint = output_path / "dppo_online_best.pt"
     history_path = output_path / "training_history.csv"
 
-    history: list[dict[str, float]] = []
+    history: list[dict[str, float | str]] = []
     best_mean_reward: float | None = None
     for iteration in range(iterations):
         buffer = DPPORolloutBuffer()
@@ -309,9 +334,19 @@ def train_dppo(
             "repair_success_rate": rollout_metrics["repair_success_rate"],
             "gradient_norm": update_metrics["gradient_norm"],
             "approximate_kl": update_metrics["approximate_kl"],
+            "maximum_approximate_kl": update_metrics[
+                "maximum_approximate_kl"
+            ],
+            "optimizer_step_count": update_metrics["optimizer_step_count"],
+            "kl_early_stopped": update_metrics["kl_early_stopped"],
             "clip_fraction": update_metrics["clip_fraction"],
+            "selected_clip_ratio": stability_profile.selected_clip_ratio,
+            "stability_profile_sha256": profile_digest,
         }
-        if not all(math.isfinite(float(value)) for value in row.values()):
+        if not all(
+            isinstance(value, str) or math.isfinite(float(value))
+            for value in row.values()
+        ):
             raise FloatingPointError("在线训练历史出现非有限指标。")
         history.append(row)
         current_reward = row["mean_reward"]
@@ -323,6 +358,7 @@ def train_dppo(
                 metadata,
                 iteration=iteration,
                 best_mean_reward=best_mean_reward,
+                stability_profile=stability_profile,
             )
         save_dppo_online_checkpoint(
             last_checkpoint,
@@ -330,13 +366,17 @@ def train_dppo(
             metadata,
             iteration=iteration,
             best_mean_reward=best_mean_reward,
+            stability_profile=stability_profile,
         )
         _write_training_history(history_path, history)
         print(
             f"iteration={iteration + 1}/{iterations} "
             f"mean_reward={row['mean_reward']:.6f} "
             f"policy_loss={row['policy_loss']:.6f} "
-            f"value_loss={row['value_loss']:.6f}"
+            f"value_loss={row['value_loss']:.6f} "
+            f"maximum_approximate_kl={row['maximum_approximate_kl']:.6f} "
+            f"clip_ratio={row['selected_clip_ratio']:.6f} "
+            f"kl_early_stopped={bool(row['kl_early_stopped'])}"
         )
     return tuple(history)
 
@@ -346,6 +386,24 @@ def main(arguments: Sequence[str] | None = None) -> None:
 
     parsed = parse_arguments(arguments)
     config = load_config(parsed.config)
+    settings = load_dppo_stability_settings(config)
+    stability_profile = load_stability_profile(parsed.stability_profile)
+    config_hash = compute_config_hash(config)
+    pretrained_sha256 = sha256_file(parsed.pretrained_checkpoint)
+    if stability_profile.pretrained_checkpoint_sha256 != pretrained_sha256:
+        raise ValueError("稳定性配置的预训练检查点 SHA256 不匹配。")
+    validate_stability_profile(
+        stability_profile,
+        config_hash=config_hash,
+        pretrained_checkpoint_path=parsed.pretrained_checkpoint,
+        settings=settings,
+    )
+    if stability_profile.selected_clip_ratio is None:
+        raise ValueError("稳定性配置未选择 clip_ratio。")
+    agent_config = build_dppo_agent_config(
+        config,
+        clip_ratio=stability_profile.selected_clip_ratio,
+    )
     training = config["dppo"]["training"]
     iterations = (
         int(training["iterations"])
@@ -372,10 +430,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
     agent = DPPOAgent(
         pretrained.model,
         CosineNoiseSchedule(metadata.diffusion_steps),
-        build_dppo_agent_config(
-            config,
-            clip_ratio=float(training["clip_ratio"]),
-        ),
+        agent_config,
         device=device,
     )
     print(
@@ -392,6 +447,7 @@ def main(arguments: Sequence[str] | None = None) -> None:
         episodes_per_iteration=episodes_per_iteration,
         seed=int(training["seed"]),
         output_root=parsed.output_root,
+        stability_profile=stability_profile,
     )
     last_checkpoint = Path(parsed.output_root) / "dppo_online_last.pt"
     restored = load_dppo_online_checkpoint(
@@ -399,6 +455,10 @@ def main(arguments: Sequence[str] | None = None) -> None:
         expected=metadata,
         device=device,
     )
+    if restored.stability_profile_sha256 != stability_profile_sha256(
+        stability_profile
+    ):
+        raise ValueError("恢复检查点的稳定性配置摘要与本次正式训练不一致。")
     print(f"最后检查点：{last_checkpoint.resolve()}")
     print(f"恢复迭代：{restored.iteration}")
     print(f"最佳平均奖励：{restored.best_mean_reward:.6f}")

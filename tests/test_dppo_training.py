@@ -1,11 +1,13 @@
 """测试 DDPO 与慢时间尺度环境连接后的在线训练闭环。"""
 
 import csv
+from dataclasses import replace
 import math
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 import run_dppo_training
@@ -20,6 +22,18 @@ from src.dppo_checkpoint import (
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
 from src.dppo_projection import ProjectionResult
 from src.dppo_scenario import build_dppo_environment
+from src.dppo_stability import (
+    DPPOStabilityProfile,
+    evaluate_calibration_candidate,
+    save_stability_profile,
+    select_stability_profile,
+    sha256_file,
+    stability_profile_sha256,
+)
+from src.dppo_training_config import (
+    DPPOStabilitySettings,
+    load_dppo_stability_settings,
+)
 
 
 class AlwaysFailProjector:
@@ -46,7 +60,7 @@ def _environment():
     return environment
 
 
-def _agent(environment) -> DPPOAgent:
+def _agent(environment, *, clip_ratio: float = 0.1) -> DPPOAgent:
     """构造小型网络，减少在线更新测试耗时。"""
 
     torch.manual_seed(17)
@@ -66,6 +80,7 @@ def _agent(environment) -> DPPOAgent:
             batch_size=8,
             update_epochs=1,
             seed=71,
+            clip_ratio=clip_ratio,
         ),
         device="cpu",
     )
@@ -88,6 +103,88 @@ def _metadata(environment, agent: DPPOAgent) -> DPPOCheckpointMetadata:
         maximum_retention_seconds=20.0,
         replica_threshold=0.0,
         config_hash="online-training-test",
+    )
+
+
+def _profile(
+    metadata: DPPOCheckpointMetadata,
+    *,
+    pretrained_sha256: str = "a" * 64,
+) -> DPPOStabilityProfile:
+    """通过正式候选评估和选择入口生成合格训练门禁。"""
+
+    settings = DPPOStabilitySettings(
+        training_sampling_min_std=0.01,
+        probability_min_std=0.10,
+        evaluation_sampling_min_std=0.001,
+        target_kl=1.0,
+        target_clip_fraction_min=0.10,
+        target_clip_fraction_max=0.20,
+        clip_ratio_candidates=(0.10,),
+        calibration_iterations=1,
+        calibration_episodes_per_iteration=1,
+        calibration_seed_start=20000,
+    )
+    result = evaluate_calibration_candidate(
+        clip_ratio=0.10,
+        mean_clip_fraction=0.15,
+        mean_approximate_kl=0.2,
+        maximum_approximate_kl=0.3,
+        optimizer_step_count=1,
+        settings=settings,
+    )
+    return select_stability_profile(
+        config_hash=metadata.config_hash,
+        pretrained_checkpoint_sha256=pretrained_sha256,
+        settings=settings,
+        episode_seeds=(20000,),
+        candidate_results=(result,),
+    )
+
+
+def _config_profile(
+    config: dict,
+    pretrained_path: Path,
+    *,
+    mode: str = "qualified",
+) -> DPPOStabilityProfile:
+    settings = load_dppo_stability_settings(config)
+    profile_settings = (
+        replace(settings, target_kl=0.5) if mode == "settings" else settings
+    )
+    maximum_kl = profile_settings.target_kl if mode == "unqualified" else 0.2
+    results = tuple(
+        evaluate_calibration_candidate(
+            clip_ratio=value,
+            mean_clip_fraction=0.15,
+            mean_approximate_kl=0.1,
+            maximum_approximate_kl=maximum_kl,
+            optimizer_step_count=1,
+            settings=profile_settings,
+        )
+        for value in profile_settings.clip_ratio_candidates
+    )
+    seed_count = (
+        profile_settings.calibration_iterations
+        * profile_settings.calibration_episodes_per_iteration
+    )
+    return select_stability_profile(
+        config_hash=(
+            "wrong-config"
+            if mode == "config_hash"
+            else run_dppo_training.compute_config_hash(config)
+        ),
+        pretrained_checkpoint_sha256=(
+            "a" * 64 if mode == "pretrained_sha" else sha256_file(pretrained_path)
+        ),
+        settings=profile_settings,
+        episode_seeds=tuple(
+            range(
+                profile_settings.calibration_seed_start,
+                profile_settings.calibration_seed_start + seed_count,
+            )
+        ),
+        candidate_results=results,
     )
 
 
@@ -166,6 +263,7 @@ def test_online_checkpoint_restores_both_policy_layers_and_value_network(
     environment = _environment()
     agent = _agent(environment)
     metadata = _metadata(environment, agent)
+    profile = _profile(metadata)
     with torch.no_grad():
         next(agent.trainable_policy.parameters()).add_(0.25)
         next(agent.value_network.parameters()).sub_(0.10)
@@ -177,6 +275,7 @@ def test_online_checkpoint_restores_both_policy_layers_and_value_network(
         metadata,
         iteration=3,
         best_mean_reward=-0.75,
+        stability_profile=profile,
     )
     loaded = load_dppo_online_checkpoint(
         checkpoint_path,
@@ -187,6 +286,8 @@ def test_online_checkpoint_restores_both_policy_layers_and_value_network(
     assert loaded.iteration == 3
     assert loaded.best_mean_reward == -0.75
     assert loaded.agent.config == agent.config
+    assert loaded.stability_profile == profile
+    assert loaded.stability_profile_sha256 == stability_profile_sha256(profile)
     _assert_same_state_dict(
         agent.frozen_policy.state_dict(),
         loaded.agent.frozen_policy.state_dict(),
@@ -209,6 +310,7 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
     environment = _environment()
     agent = _agent(environment)
     metadata = _metadata(environment, agent)
+    profile = _profile(metadata)
     output_root = tmp_path / "online-output"
 
     history = train_dppo(
@@ -219,6 +321,7 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
         episodes_per_iteration=1,
         seed=90,
         output_root=output_root,
+        stability_profile=profile,
     )
 
     expected_paths = {
@@ -228,7 +331,10 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
     }
     assert expected_paths <= set(output_root.iterdir())
     assert len(history) == 1
-    assert all(math.isfinite(float(value)) for value in history[0].values())
+    assert all(
+        isinstance(value, str) or math.isfinite(float(value))
+        for value in history[0].values()
+    )
     with (output_root / "training_history.csv").open(
         "r",
         encoding="utf-8-sig",
@@ -245,23 +351,169 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
         "projection_rejection_rate",
         "repair_success_rate",
         "gradient_norm",
+        "maximum_approximate_kl",
+        "optimizer_step_count",
+        "kl_early_stopped",
+        "selected_clip_ratio",
+        "stability_profile_sha256",
     } <= rows[0].keys()
+    assert rows[0]["stability_profile_sha256"] == stability_profile_sha256(profile)
     loaded = load_dppo_online_checkpoint(
         output_root / "dppo_online_last.pt",
         expected=metadata,
         device="cpu",
     )
     assert loaded.iteration == 0
+    assert loaded.stability_profile == profile
+    best_loaded = load_dppo_online_checkpoint(
+        output_root / "dppo_online_best.pt",
+        expected=metadata,
+        device="cpu",
+    )
+    assert best_loaded.stability_profile == profile
+    assert best_loaded.stability_profile_sha256 == stability_profile_sha256(profile)
 
 
-def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
+def test_training_rejects_profile_binding_before_creating_output(tmp_path: Path) -> None:
+    environment = _environment()
+    agent = _agent(environment)
+    metadata = _metadata(environment, agent)
+    output_root = tmp_path / "must-not-exist"
+
+    with pytest.raises(ValueError, match="config_hash"):
+        train_dppo(
+            environment,
+            agent,
+            metadata,
+            iterations=1,
+            episodes_per_iteration=1,
+            seed=90,
+            output_root=output_root,
+            stability_profile=replace(_profile(metadata), config_hash="wrong"),
+        )
+
+    assert not output_root.exists()
+
+
+def test_training_rejects_agent_profile_binding_before_creating_output(
+    tmp_path: Path,
+) -> None:
+    environment = _environment()
+    agent = _agent(environment, clip_ratio=0.2)
+    metadata = _metadata(environment, agent)
+    output_root = tmp_path / "must-not-exist"
+
+    with pytest.raises(ValueError, match="clip_ratio"):
+        train_dppo(
+            environment,
+            agent,
+            metadata,
+            iterations=1,
+            episodes_per_iteration=1,
+            seed=90,
+            output_root=output_root,
+            stability_profile=_profile(metadata),
+        )
+
+    assert not output_root.exists()
+
+
+def test_training_cli_requires_stability_profile() -> None:
+    with pytest.raises(SystemExit):
+        run_dppo_training.parse_arguments(
+            ["--pretrained-checkpoint", "pretrained.pt", "--output-root", "out"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("mode", "message"),
+    [
+        ("unqualified", "未通过"),
+        ("config_hash", "配置哈希"),
+        ("pretrained_sha", "SHA256"),
+        ("settings", "target_kl"),
+    ],
+)
+def test_main_rejects_invalid_profile_before_creating_output(
+    tmp_path: Path,
+    monkeypatch,
+    mode: str,
+    message: str,
+) -> None:
+    config = load_config("configs/debug.yaml")
+    pretrained_path = tmp_path / "pretrained.pt"
+    pretrained_path.write_bytes(b"pretrained")
+    profile_path = tmp_path / "profile.json"
+    save_stability_profile(
+        profile_path,
+        _config_profile(config, pretrained_path, mode=mode),
+    )
+    output_root = tmp_path / "must-not-exist"
+
+    monkeypatch.setattr(
+        run_dppo_training,
+        "build_dppo_environment",
+        lambda _config: pytest.fail("profile 校验失败前不得创建环境"),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        run_dppo_training.main(
+            [
+                "--pretrained-checkpoint",
+                str(pretrained_path),
+                "--stability-profile",
+                str(profile_path),
+                "--output-root",
+                str(output_root),
+                "--device",
+                "cpu",
+            ]
+        )
+
+    assert not output_root.exists()
+
+
+def test_main_uses_qualified_profile_clip_ratio_instead_of_yaml(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    """接入 profile 前，旧训练入口仍显式把 YAML clip_ratio 交给唯一 builder。"""
+    """正式训练只能消费 profile 选择值，不能回退到 YAML clip_ratio。"""
 
     config = load_config("configs/debug.yaml")
-    built_config = object()
+    pretrained_path = tmp_path / "pretrained.pt"
+    pretrained_path.write_bytes(b"pretrained")
+    config_hash = run_dppo_training.compute_config_hash(config)
+    settings = load_dppo_stability_settings(config)
+    results = tuple(
+        evaluate_calibration_candidate(
+            clip_ratio=value,
+            mean_clip_fraction=0.15,
+            mean_approximate_kl=0.2,
+            maximum_approximate_kl=0.3,
+            optimizer_step_count=1,
+            settings=settings,
+        )
+        for value in settings.clip_ratio_candidates
+    )
+    seed_count = (
+        settings.calibration_iterations
+        * settings.calibration_episodes_per_iteration
+    )
+    profile = select_stability_profile(
+        config_hash=config_hash,
+        pretrained_checkpoint_sha256=sha256_file(pretrained_path),
+        settings=settings,
+        episode_seeds=tuple(
+            range(
+                settings.calibration_seed_start,
+                settings.calibration_seed_start + seed_count,
+            )
+        ),
+        candidate_results=results,
+    )
+    profile_path = tmp_path / "profile.json"
+    save_stability_profile(profile_path, profile)
+    built_config = SimpleNamespace(clip_ratio=profile.selected_clip_ratio)
     observed: list[tuple[dict, float]] = []
     environment = SimpleNamespace(dimensions=SimpleNamespace(state_dim=3, action_dim=2))
     agent = SimpleNamespace(frozen_denoising_steps=2, trainable_denoising_steps=2)
@@ -271,7 +523,10 @@ def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
     monkeypatch.setattr(
         run_dppo_training,
         "_checkpoint_metadata",
-        lambda *_args: SimpleNamespace(diffusion_steps=4),
+        lambda *_args: SimpleNamespace(
+            diffusion_steps=4,
+            config_hash=config_hash,
+        ),
     )
     monkeypatch.setattr(
         run_dppo_training,
@@ -284,7 +539,11 @@ def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
     monkeypatch.setattr(
         run_dppo_training,
         "load_dppo_online_checkpoint",
-        lambda *_args, **_kwargs: SimpleNamespace(iteration=0, best_mean_reward=0.0),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            iteration=0,
+            best_mean_reward=0.0,
+            stability_profile_sha256=stability_profile_sha256(profile),
+        ),
     )
 
     def fake_builder(actual_config, *, clip_ratio):
@@ -296,7 +555,9 @@ def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
     run_dppo_training.main(
         [
             "--pretrained-checkpoint",
-            str(tmp_path / "pretrained.pt"),
+            str(pretrained_path),
+            "--stability-profile",
+            str(profile_path),
             "--output-root",
             str(tmp_path / "output"),
             "--device",
@@ -305,4 +566,4 @@ def test_main_uses_unified_agent_config_builder_with_legacy_clip_ratio(
     )
 
     assert not hasattr(run_dppo_training, "_agent_config")
-    assert observed == [(config, float(config["dppo"]["training"]["clip_ratio"]))]
+    assert observed == [(config, profile.selected_clip_ratio)]
