@@ -20,6 +20,9 @@ def test_load_debug_config() -> None:
     assert len(config["rl_scenario"]["functions"]) == 3
     assert config["rl_scenario"]["sfc"]["function_ids"] == [0, 1, 2]
     assert config["dppo"]["action"]["maximum_retention_seconds"] == 20.0
+    assert config["dppo"]["action"]["schema_version"] == "joint-sfc-continuous-v2"
+    assert config["dppo"]["action"]["minimum_replicas"] == 2
+    assert config["dppo"]["action"]["maximum_replicas"] == 3
     assert config["dppo"]["diffusion"]["steps"] == 20
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
     assert config["dppo"]["training"]["iterations"] > 0
@@ -76,13 +79,46 @@ def test_validate_config_matches_fault_domains_to_mec_count() -> None:
         validate_config(config)
 
 
-def test_validate_config_rejects_unencodable_replica_threshold() -> None:
-    """阈值为 -1 时没有更小的合法动作值可用于表示 2 副本。"""
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("minimum_replicas", True),
+        ("minimum_replicas", 0),
+        ("maximum_replicas", 0),
+        ("maximum_replicas", 2.5),
+    ),
+)
+def test_validate_config_rejects_invalid_replica_bounds(
+    field: str,
+    value: object,
+) -> None:
+    """副本上下限必须是正整数，避免产生无法执行的部署数量。"""
 
     config = deepcopy(load_config("configs/debug.yaml"))
-    config["dppo"]["action"]["replica_threshold"] = -1.0
+    config["dppo"]["action"][field] = value
 
-    with pytest.raises(ValueError, match=r"replica_threshold.*\(-1, 1\]"):
+    with pytest.raises(ValueError, match=field):
+        validate_config(config)
+
+
+def test_validate_config_rejects_reversed_replica_bounds() -> None:
+    """下限不能大于上限。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["action"]["minimum_replicas"] = 4
+    config["dppo"]["action"]["maximum_replicas"] = 3
+
+    with pytest.raises(ValueError, match="minimum_replicas.*maximum_replicas"):
+        validate_config(config)
+
+
+def test_validate_config_rejects_replica_maximum_above_compute_nodes() -> None:
+    """副本上限不能超过 DPPO 实际可部署的 MEC 与中心云节点总数。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["action"]["maximum_replicas"] = 99
+
+    with pytest.raises(ValueError, match="compute_node_count"):
         validate_config(config)
 
 

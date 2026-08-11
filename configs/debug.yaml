@@ -553,9 +553,11 @@ rl_environment:
 
 dppo:
   action:
-    schema_version: joint-sfc-continuous-v1
+    schema_version: joint-sfc-continuous-v2
     maximum_retention_seconds: 20.0
-    replica_threshold: 0.0
+    # 每个 VNF 的副本数上下限；扩展实验规模时只需修改这里。
+    minimum_replicas: 2
+    maximum_replicas: 3
 
   diffusion:
     steps: 20

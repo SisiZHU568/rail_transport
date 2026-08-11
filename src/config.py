@@ -86,14 +86,14 @@ def validate_config(config: dict[str, Any]) -> None:
         or float(maximum_retention) <= 0.0
     ):
         raise ValueError("maximum_retention_seconds 必须是正有限数。")
-    replica_threshold = action.get("replica_threshold")
-    if (
-        isinstance(replica_threshold, bool)
-        or not isinstance(replica_threshold, (int, float))
-        or not math.isfinite(float(replica_threshold))
-        or not -1.0 < float(replica_threshold) <= 1.0
-    ):
-        raise ValueError("replica_threshold 必须位于 (-1, 1]。")
+    minimum_replicas = _require_positive_integer(action, "minimum_replicas")
+    maximum_replicas = _require_positive_integer(action, "maximum_replicas")
+    if minimum_replicas > maximum_replicas:
+        raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
+    # DPPO 当前只把轨旁 MEC 和中心云作为 VNF 部署节点，车载节点不计入上限。
+    compute_node_count = mec_count + int(topology.get("include_cloud") is True)
+    if maximum_replicas > compute_node_count:
+        raise ValueError("maximum_replicas 不能大于 compute_node_count。")
 
     diffusion = _require_mapping(dppo, "diffusion")
     diffusion_steps = _require_positive_integer(diffusion, "steps")

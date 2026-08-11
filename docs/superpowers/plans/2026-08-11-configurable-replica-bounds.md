@@ -114,7 +114,7 @@ Expected: failures mention missing `minimum_replicas` / `maximum_replicas` const
 
 - [ ] **Step 4: Implement configuration validation**
 
-In `src/config.py`, replace `replica_threshold` validation with positive integer checks and compute the configured node count from MEC, onboard, and cloud settings:
+In `src/config.py`, replace `replica_threshold` validation with positive integer checks and compute the configured DPPO deployment-node count from trackside MECs and the cloud. The onboard node is not part of `ScenarioDimensions.compute_node_ids`, so it must not increase this limit:
 
 ```python
 minimum_replicas = _require_positive_integer(action, "minimum_replicas")
@@ -122,7 +122,6 @@ maximum_replicas = _require_positive_integer(action, "maximum_replicas")
 if minimum_replicas > maximum_replicas:
     raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
 compute_node_count = int(config["topology"]["mec_count"])
-compute_node_count += int(bool(config["topology"]["include_onboard"]))
 compute_node_count += int(bool(config["topology"]["include_cloud"]))
 if maximum_replicas > compute_node_count:
     raise ValueError("maximum_replicas 不能大于 compute_node_count。")
@@ -354,7 +353,7 @@ Run:
 
 ```powershell
 $env:PYTHONUTF8='1'
-D:\Anaconda3\python.exe -m pytest tests/test_dppo_checkpoint.py tests/test_dppo_pretraining.py tests/test_dppo_training.py -q --basetemp=..\.pytest_tmp\replica_bounds_green3
+D:\Anaconda3\python.exe -m pytest tests/test_dppo_checkpoint.py tests/test_dppo_training.py -q --basetemp=..\.pytest_tmp\replica_bounds_green3
 ```
 
 Expected: all pass.
@@ -388,7 +387,7 @@ Run:
 
 ```powershell
 $env:PYTHONUTF8='1'
-D:\Anaconda3\python.exe -m pytest tests/test_config.py tests/test_dppo_action_space.py tests/test_dppo_teacher.py tests/test_dppo_projection.py tests/test_dppo_checkpoint.py tests/test_dppo_pretraining.py tests/test_dppo_training.py -q --basetemp=..\.pytest_tmp\replica_bounds_final
+D:\Anaconda3\python.exe -m pytest tests/test_config.py tests/test_dppo_action_space.py tests/test_dppo_teacher.py tests/test_dppo_projection.py tests/test_dppo_checkpoint.py tests/test_dppo_training.py -q --basetemp=..\.pytest_tmp\replica_bounds_final
 ```
 
 Expected: all tests pass. Do not run the unrelated full project suite.

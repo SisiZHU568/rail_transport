@@ -43,7 +43,8 @@ class DPPOActionSpace:
         self,
         dimensions: ScenarioDimensions,
         maximum_retention_seconds: float,
-        replica_threshold: float = 0.0,
+        minimum_replicas: int,
+        maximum_replicas: int,
     ) -> None:
         """保存动作参数，并预先计算所有动态切片。"""
 
@@ -55,17 +56,27 @@ class DPPOActionSpace:
         ):
             raise ValueError("maximum_retention_seconds 必须是正有限数。")
 
-        threshold = float(replica_threshold)
         if (
-            isinstance(replica_threshold, bool)
-            or not math.isfinite(threshold)
-            or not -1.0 < threshold <= 1.0
+            isinstance(minimum_replicas, bool)
+            or not isinstance(minimum_replicas, int)
+            or minimum_replicas <= 0
         ):
-            raise ValueError("replica_threshold 必须位于 (-1, 1]。")
+            raise ValueError("minimum_replicas 必须是正整数。")
+        if (
+            isinstance(maximum_replicas, bool)
+            or not isinstance(maximum_replicas, int)
+            or maximum_replicas <= 0
+        ):
+            raise ValueError("maximum_replicas 必须是正整数。")
+        if minimum_replicas > maximum_replicas:
+            raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
+        if maximum_replicas > dimensions.compute_node_count:
+            raise ValueError("maximum_replicas 不能大于 compute_node_count。")
 
         self.dimensions = dimensions
         self.maximum_retention_seconds = maximum_retention
-        self.replica_threshold = threshold
+        self.minimum_replicas = minimum_replicas
+        self.maximum_replicas = maximum_replicas
 
         self.node_score_count = (
             dimensions.function_count * dimensions.compute_node_count
@@ -136,10 +147,8 @@ class DPPOActionSpace:
                     key=lambda node_id: (-score_by_node[node_id], node_id),
                 )
             )
-            replica_count = (
-                3
-                if float(replica_scores[function_index]) >= self.replica_threshold
-                else 2
+            replica_count = self._decode_replica_count(
+                float(replica_scores[function_index])
             )
             primary_seconds, backup_seconds = (
                 self._retention_seconds(value)
@@ -157,6 +166,28 @@ class DPPOActionSpace:
 
         return DecodedDPPOAction(function_actions=tuple(function_actions))
 
+    def _decode_replica_count(self, score: float) -> int:
+        """把一个连续分量均匀量化为配置区间内的整数副本数。"""
+
+        candidate_count = self.maximum_replicas - self.minimum_replicas + 1
+        normalized = (float(score) + 1.0) / 2.0
+        index = min(
+            int(math.floor(normalized * candidate_count)),
+            candidate_count - 1,
+        )
+        return self.minimum_replicas + index
+
+    def _encode_replica_count(self, replica_count: int) -> float:
+        """把教师副本数放在量化区间中心，确保编码后能稳定解码。"""
+
+        if isinstance(replica_count, bool) or not isinstance(replica_count, int):
+            raise ValueError("教师动作的副本数必须是整数。")
+        if not self.minimum_replicas <= replica_count <= self.maximum_replicas:
+            raise ValueError("教师动作的副本数必须位于配置上下限内。")
+        candidate_count = self.maximum_replicas - self.minimum_replicas + 1
+        index = replica_count - self.minimum_replicas
+        return -1.0 + 2.0 * (index + 0.5) / candidate_count
+
     def _retention_seconds(self, normalized_value: float) -> float:
         """把 ``[-1, 1]`` 中的归一化值线性转换为秒。"""
 
@@ -172,8 +203,8 @@ class DPPOActionSpace:
     ) -> np.ndarray:
         """把仿真教师给出的可解释动作编码为同一连续向量。
 
-        节点排名被均匀映射到 ``[1, -1]``。2/3 副本分别编码为
-        ``-1`` 和 ``1``，因此对任何合法阈值都能保持原副本语义。
+        节点排名被均匀映射到 ``[1, -1]``。副本数使用量化区间中心编码，
+        因此增加可选档位时仍然只占用每个 VNF 的一个连续动作分量。
         """
 
         actions = tuple(function_actions)
@@ -201,9 +232,6 @@ class DPPOActionSpace:
                 or set(action.ranked_node_ids) != expected_node_set
             ):
                 raise ValueError("教师节点排名必须包含全部计算节点且不能重复。")
-            if action.replica_count not in (2, 3):
-                raise ValueError("教师动作的副本数只能是 2 或 3。")
-
             score_by_node = {
                 node_id: 1.0 - 2.0 * rank / ranking_denominator
                 for rank, node_id in enumerate(action.ranked_node_ids)
@@ -212,8 +240,8 @@ class DPPOActionSpace:
                 [score_by_node[node_id] for node_id in expected_nodes],
                 dtype=np.float32,
             )
-            replica_scores[function_index] = (
-                -1.0 if action.replica_count == 2 else 1.0
+            replica_scores[function_index] = self._encode_replica_count(
+                action.replica_count
             )
             retention_values[function_index, 0] = self._encode_retention(
                 action.primary_retention_seconds
