@@ -7,8 +7,10 @@ from dataclasses import asdict, dataclass
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Any
 
 from src.dppo_training_config import DPPOStabilitySettings
@@ -299,6 +301,20 @@ class DPPOStabilityProfile:
 def _verify_profile_integrity(profile: DPPOStabilityProfile) -> None:
     """重算候选和 profile 派生结论，拒绝指标与结论不一致的篡改。"""
 
+    if (
+        not isinstance(profile.episode_seeds, tuple)
+        or not profile.episode_seeds
+        or any(
+            isinstance(seed, bool)
+            or not isinstance(seed, int)
+            or seed < 0
+            for seed in profile.episode_seeds
+        )
+        or len(profile.episode_seeds) != len(set(profile.episode_seeds))
+    ):
+        raise ValueError(
+            "稳定性配置完整性校验失败：episode_seeds 必须是非空、无重复的非负整数元组。"
+        )
     if not isinstance(profile.candidate_results, tuple) or any(
         not isinstance(result, DPPOCalibrationCandidateResult)
         for result in profile.candidate_results
@@ -581,11 +597,35 @@ def parse_stability_profile_json(serialized: str) -> DPPOStabilityProfile:
 
 
 def save_stability_profile(path: str | Path, profile: DPPOStabilityProfile) -> None:
-    """以 UTF-8 和单个结尾换行保存规范 profile。"""
+    """以 UTF-8、单个 LF 和同目录原子替换保存规范 profile。"""
 
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(stability_profile_json(profile) + "\n", encoding="utf-8")
+    payload = stability_profile_json(profile).encode("utf-8") + b"\n"
+    temporary_path: Path | None = None
+    try:
+        # 临时文件必须与目标位于同一目录，关闭并 fsync 后再替换；
+        # 因此中途写入或替换失败都不会留下半份新 profile 覆盖旧文件。
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=output.parent,
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            temporary_file.write(payload)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_path, output)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            # 替换失败时尽力删除同目录临时文件，同时保留原始异常供调用者处理。
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def load_stability_profile(path: str | Path) -> DPPOStabilityProfile:

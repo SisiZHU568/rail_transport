@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 import json
 import math
+import os
 
 import pytest
 
@@ -95,6 +96,15 @@ def test_load_settings_and_build_agent_config_map_every_algorithm_field() -> Non
     assert agent.evaluation_sampling_min_std == settings.evaluation_sampling_min_std
     assert agent.target_kl == settings.target_kl
     assert agent.normalize_advantages is True
+
+
+@pytest.mark.parametrize("invalid", [None, "256,256", {"width": 256}])
+def test_build_agent_config_rejects_non_sequence_value_hidden_dims(invalid) -> None:
+    config = load_config("configs/debug.yaml")
+    config["dppo"]["training"]["value_hidden_dims"] = invalid
+
+    with pytest.raises(ValueError, match=r"dppo\.training\.value_hidden_dims"):
+        build_dppo_agent_config(config, clip_ratio=0.10)
 
 
 @pytest.mark.parametrize(
@@ -293,6 +303,39 @@ def test_profile_json_round_trip_digest_and_file_io_are_canonical(tmp_path) -> N
     )
 
 
+def test_save_profile_writes_exactly_one_binary_lf_without_crlf(tmp_path) -> None:
+    profile, _ = _profile(tmp_path)
+    output = tmp_path / "stability.json"
+
+    save_stability_profile(output, profile)
+
+    payload = output.read_bytes()
+    assert b"\r\n" not in payload
+    assert payload.endswith(b"\n")
+    assert not payload.endswith(b"\n\n")
+
+
+def test_save_profile_replace_failure_preserves_old_file_and_cleans_temp(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    profile, _ = _profile(tmp_path)
+    output = tmp_path / "stability.json"
+    output.write_bytes(b"old-profile\n")
+    original_entries = set(tmp_path.iterdir())
+
+    def fail_replace(source, destination) -> None:
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        save_stability_profile(output, profile)
+
+    assert output.read_bytes() == b"old-profile\n"
+    assert set(tmp_path.iterdir()) == original_entries
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -391,6 +434,26 @@ def test_validate_profile_rechecks_candidate_set_after_in_memory_tampering(tmp_p
     object.__setattr__(profile, "candidate_results", profile.candidate_results[:-1])
 
     with pytest.raises(ValueError, match="完整性"):
+        validate_stability_profile(
+            profile,
+            config_hash=profile.config_hash,
+            pretrained_checkpoint_path=checkpoint,
+            settings=_settings(),
+        )
+
+
+@pytest.mark.parametrize(
+    "tampered_seeds",
+    [(), [20000, 20001], (20000, True), (20000, -1), (20000, 20000)],
+)
+def test_validate_profile_rechecks_episode_seeds_before_indexing(
+    tmp_path,
+    tampered_seeds,
+) -> None:
+    profile, checkpoint = _profile(tmp_path)
+    object.__setattr__(profile, "episode_seeds", tampered_seeds)
+
+    with pytest.raises(ValueError, match="episode_seeds"):
         validate_stability_profile(
             profile,
             config_hash=profile.config_hash,

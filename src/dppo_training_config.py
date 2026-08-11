@@ -180,6 +180,21 @@ def build_dppo_agent_config(
     training = _mapping(dppo, "training")
     diffusion = _mapping(dppo, "diffusion")
     settings = load_dppo_stability_settings(config)
+    raw_hidden_dims = training.get("value_hidden_dims")
+    if (
+        not isinstance(raw_hidden_dims, (list, tuple))
+        or not raw_hidden_dims
+        or any(
+            isinstance(width, bool)
+            or not isinstance(width, int)
+            or width <= 0
+            for width in raw_hidden_dims
+        )
+    ):
+        raise ValueError(
+            "dppo.training.value_hidden_dims 必须是非空正整数列表或元组。"
+        )
+    hidden_dims = tuple(raw_hidden_dims)
 
     # clip_ratio 故意不读取 training.clip_ratio；后续训练和校准都必须显式选择候选值。
     try:
@@ -195,7 +210,7 @@ def build_dppo_agent_config(
             gradient_clip_norm=training["gradient_clip_norm"],
             diffusion_steps=diffusion["steps"],
             fine_tuned_steps=diffusion["fine_tuned_steps"],
-            value_hidden_dims=tuple(training["value_hidden_dims"]),
+            value_hidden_dims=hidden_dims,
             seed=training["seed"],
             training_sampling_min_std=settings.training_sampling_min_std,
             probability_min_std=settings.probability_min_std,
