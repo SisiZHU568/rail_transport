@@ -48,9 +48,6 @@ class DPPOConfig:
     denoising_discount: float = 0.99
     policy_learning_rate: float = 3e-4
     value_learning_rate: float = 3e-4
-    training_sampling_min_std: float = 0.01
-    probability_min_std: float = 0.10
-    evaluation_sampling_min_std: float = 0.001
     batch_size: int = 64
     update_epochs: int = 10
     gradient_clip_norm: float = 5.0
@@ -58,6 +55,9 @@ class DPPOConfig:
     fine_tuned_steps: int = 5
     value_hidden_dims: tuple[int, ...] = (256, 256)
     seed: int = 13000
+    training_sampling_min_std: float = 0.01
+    probability_min_std: float = 0.10
+    evaluation_sampling_min_std: float = 0.001
 
     def __post_init__(self) -> None:
         """在训练开始前一次性拦截无效超参数。"""
@@ -534,8 +534,8 @@ class DPPOAgent:
                     dtype=current_actions.dtype,
                 )
                 next_actions = means + sampling_standard_deviations * noise
-                # 探索噪声决定实际送入环境的动作；PPO 概率尺度更宽，避免末步
-                # 极小采样方差把轻微策略变化放大成失控的概率比。
+                # 探索噪声决定实际送入环境的动作；默认配置下 PPO 概率尺度
+                # 更宽，避免末步极小采样方差把轻微策略变化放大成失控的概率比。
                 probability_standard_deviations = (
                     self.schedule.reverse_standard_deviation(
                         current_actions,

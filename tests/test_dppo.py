@@ -189,6 +189,15 @@ def test_config_has_separate_validated_diffusion_standard_deviation_floors() -> 
             DPPOConfig(**{field_name: 0.0})
 
 
+def test_config_preserves_original_positional_parameter_order() -> None:
+    """新增配置不得改变原有位置参数含义，以免旧训练脚本静默错绑参数。"""
+
+    config = DPPOConfig(0.99, 0.95, 0.20, 0.99, 3e-4, 3e-4, 32)
+
+    assert config.batch_size == 32
+    assert config.training_sampling_min_std == pytest.approx(0.01)
+
+
 def test_seeded_hybrid_sampler_records_every_reverse_transition() -> None:
     """双层策略采样仍应返回初始噪声、全部中间动作和每步旧概率。"""
 
