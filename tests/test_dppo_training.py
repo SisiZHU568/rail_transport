@@ -153,10 +153,14 @@ def _config_profile(
         replace(settings, target_kl=0.5) if mode == "settings" else settings
     )
     maximum_kl = profile_settings.target_kl if mode == "unqualified" else 0.2
+    qualifying_clip_fraction = (
+        profile_settings.target_clip_fraction_min
+        + profile_settings.target_clip_fraction_max
+    ) / 2.0
     results = tuple(
         evaluate_calibration_candidate(
             clip_ratio=value,
-            mean_clip_fraction=0.15,
+            mean_clip_fraction=qualifying_clip_fraction,
             mean_approximate_kl=0.1,
             maximum_approximate_kl=maximum_kl,
             optimizer_step_count=1,
@@ -486,10 +490,14 @@ def test_main_uses_qualified_profile_clip_ratio_instead_of_yaml(
     pretrained_path.write_bytes(b"pretrained")
     config_hash = run_dppo_training.compute_config_hash(config)
     settings = load_dppo_stability_settings(config)
+    qualifying_clip_fraction = (
+        settings.target_clip_fraction_min
+        + settings.target_clip_fraction_max
+    ) / 2.0
     results = tuple(
         evaluate_calibration_candidate(
             clip_ratio=value,
-            mean_clip_fraction=0.15,
+            mean_clip_fraction=qualifying_clip_fraction,
             mean_approximate_kl=0.2,
             maximum_approximate_kl=0.3,
             optimizer_step_count=1,

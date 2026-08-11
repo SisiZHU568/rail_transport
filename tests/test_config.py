@@ -26,6 +26,7 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
     assert config["dppo"]["training"]["normalize_advantages"] is True
+    assert config["dppo"]["training"]["policy_learning_rate"] == 0.0001
     assert config["dppo"]["training"]["clip_ratio_base"] == 0.001
     assert config["dppo"]["training"]["clip_ratio_rate"] == 3.0
     stability = config["dppo"]["stability"]
@@ -34,11 +35,11 @@ def test_load_debug_config() -> None:
         "probability_min_std": 0.10,
         "evaluation_sampling_min_std": 0.001,
         "target_kl": 1.0,
-        "target_clip_fraction_min": 0.10,
-        "target_clip_fraction_max": 0.20,
+        "target_clip_fraction_min": 0.60,
+        "target_clip_fraction_max": 0.85,
         "clip_ratio_candidates": [0.10, 0.01, 0.001],
-        "calibration_iterations": 3,
-        "calibration_episodes_per_iteration": 2,
+        "calibration_iterations": 1,
+        "calibration_episodes_per_iteration": 1,
         "calibration_seed_start": 20000,
     }
     assert config["dppo"]["training"]["seed"] == 13000

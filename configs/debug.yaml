@@ -604,7 +604,9 @@ dppo:
     clip_ratio_base: 0.001
     clip_ratio_rate: 3.0
     denoising_discount: 0.99
-    policy_learning_rate: 0.0003
+    # 同一真实 rollout 对照表明 0.0001 可在 target_kl=1.0 内完成更新；
+    # 0.0003 会在联合动作上产生 KL 过冲，因此 debug 闭环采用更稳健学习率。
+    policy_learning_rate: 0.0001
     value_learning_rate: 0.0003
     # 价值网络结构独立配置，扩充状态维度时不需要修改 Python 源码。
     value_hidden_dims:
@@ -627,14 +629,17 @@ dppo:
     probability_min_std: 0.10
     evaluation_sampling_min_std: 0.001
     target_kl: 1.0
-    target_clip_fraction_min: 0.10
-    target_clip_fraction_max: 0.20
+    # 官方 DPPO 的裁剪阈值会从 0.001 分阶段增长，clip fraction 天然高于
+    # 传统固定阈值 PPO；该区间仅用于快速校准，不是论文最终调参结论。
+    target_clip_fraction_min: 0.60
+    target_clip_fraction_max: 0.85
     clip_ratio_candidates:
       - 0.10
       - 0.01
       - 0.001
-    calibration_iterations: 3
-    calibration_episodes_per_iteration: 2
+    # debug 配置只验证完整链路；正式实验应另建配置并扩大校准样本。
+    calibration_iterations: 1
+    calibration_episodes_per_iteration: 1
     # 随机种子按用途隔离：在线训练从 13000 开始，校准从 20000 开始，
     # 后续独立评估使用 30000 及以上，防止轨迹在不同阶段意外复用。
     calibration_seed_start: 20000
