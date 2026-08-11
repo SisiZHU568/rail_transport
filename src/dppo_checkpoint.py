@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 
+from src.dppo import DPPOAgent, DPPOConfig
 from src.dppo_diffusion import (
     ConditionalDiffusionMLP,
     CosineNoiseSchedule,
@@ -73,6 +74,17 @@ class LoadedDPPOCheckpoint:
     optimizer: torch.optim.Adam
     metadata: DPPOCheckpointMetadata
     epoch: int
+    rng_state: torch.Tensor
+
+
+@dataclass(frozen=True)
+class LoadedDPPOOnlineCheckpoint:
+    """保存恢复后的双层策略、价值网络及在线训练进度。"""
+
+    agent: DPPOAgent
+    metadata: DPPOCheckpointMetadata
+    iteration: int
+    best_mean_reward: float
     rng_state: torch.Tensor
 
 
@@ -355,5 +367,128 @@ def load_dppo_checkpoint(
         optimizer=optimizer,
         metadata=actual,
         epoch=epoch,
+        rng_state=rng_state.clone(),
+    )
+
+
+def save_dppo_online_checkpoint(
+    checkpoint_path: str | Path,
+    agent: DPPOAgent,
+    metadata: DPPOCheckpointMetadata,
+    *,
+    iteration: int,
+    best_mean_reward: float,
+) -> None:
+    """保存可继续训练的完整 DDPO 双层策略、价值网络和优化器。"""
+
+    if not isinstance(agent, DPPOAgent):
+        raise TypeError("agent 必须是 DPPOAgent。")
+    if not isinstance(metadata, DPPOCheckpointMetadata):
+        raise TypeError("metadata 必须是 DPPOCheckpointMetadata。")
+    if agent.state_dim != metadata.state_dim or agent.action_dim != metadata.action_dim:
+        raise ValueError("智能体维度与在线检查点元数据不一致。")
+    if (
+        agent.config.diffusion_steps != metadata.diffusion_steps
+        or agent.config.fine_tuned_steps != metadata.fine_tuned_steps
+    ):
+        raise ValueError("智能体去噪步数与在线检查点元数据不一致。")
+    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
+        raise ValueError("iteration 必须是非负整数。")
+    reward = float(best_mean_reward)
+    if not math.isfinite(reward):
+        raise ValueError("best_mean_reward 必须是有限数。")
+
+    path = Path(checkpoint_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "format_version": "dppo-online-checkpoint-v1",
+        "metadata": asdict(metadata),
+        "config": asdict(agent.config),
+        "model_hidden_dims": tuple(agent.frozen_policy.hidden_dims),
+        # 固定前段和可训练末段必须分别保存，恢复后不能混成一个网络。
+        "frozen_policy_state_dict": agent.frozen_policy.state_dict(),
+        "trainable_policy_state_dict": agent.trainable_policy.state_dict(),
+        "value_network_state_dict": agent.value_network.state_dict(),
+        "policy_optimizer_state_dict": agent.policy_optimizer.state_dict(),
+        "value_optimizer_state_dict": agent.value_optimizer.state_dict(),
+        "iteration": iteration,
+        "best_mean_reward": reward,
+        "torch_rng_state": torch.get_rng_state(),
+        "cuda_rng_states": (
+            torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+        ),
+    }
+    torch.save(payload, path)
+
+
+def load_dppo_online_checkpoint(
+    checkpoint_path: str | Path,
+    *,
+    expected: DPPOCheckpointMetadata,
+    device: str | torch.device,
+) -> LoadedDPPOOnlineCheckpoint:
+    """校验元数据后恢复可继续训练和独立评估的完整 DDPO 智能体。"""
+
+    resolved_device = resolve_torch_device(device)
+    payload = torch.load(
+        Path(checkpoint_path),
+        map_location=resolved_device,
+        weights_only=True,
+    )
+    if payload.get("format_version") != "dppo-online-checkpoint-v1":
+        raise ValueError("在线检查点 format_version 不受支持。")
+    actual = DPPOCheckpointMetadata(**payload["metadata"])
+    validate_checkpoint_metadata(actual, expected)
+    config = DPPOConfig(**payload["config"])
+    if (
+        config.diffusion_steps != actual.diffusion_steps
+        or config.fine_tuned_steps != actual.fine_tuned_steps
+    ):
+        raise ValueError("在线检查点配置与元数据的去噪步数不一致。")
+
+    frozen_policy = ConditionalDiffusionMLP(
+        actual.state_dim,
+        actual.action_dim,
+        tuple(int(width) for width in payload["model_hidden_dims"]),
+    ).to(resolved_device)
+    frozen_policy.load_state_dict(payload["frozen_policy_state_dict"], strict=True)
+    agent = DPPOAgent(
+        frozen_policy,
+        CosineNoiseSchedule(actual.diffusion_steps),
+        config,
+        device=resolved_device,
+    )
+    agent.frozen_policy.load_state_dict(
+        payload["frozen_policy_state_dict"],
+        strict=True,
+    )
+    agent.trainable_policy.load_state_dict(
+        payload["trainable_policy_state_dict"],
+        strict=True,
+    )
+    agent.value_network.load_state_dict(
+        payload["value_network_state_dict"],
+        strict=True,
+    )
+    agent.policy_optimizer.load_state_dict(payload["policy_optimizer_state_dict"])
+    agent.value_optimizer.load_state_dict(payload["value_optimizer_state_dict"])
+
+    iteration = payload["iteration"]
+    if isinstance(iteration, bool) or not isinstance(iteration, int) or iteration < 0:
+        raise ValueError("在线检查点 iteration 必须是非负整数。")
+    best_mean_reward = float(payload["best_mean_reward"])
+    if not math.isfinite(best_mean_reward):
+        raise ValueError("在线检查点 best_mean_reward 必须是有限数。")
+    rng_state = payload["torch_rng_state"].cpu()
+    torch.set_rng_state(rng_state)
+    if resolved_device.type == "cuda" and payload["cuda_rng_states"]:
+        torch.cuda.set_rng_state_all(
+            [state.cpu() for state in payload["cuda_rng_states"]]
+        )
+    return LoadedDPPOOnlineCheckpoint(
+        agent=agent,
+        metadata=actual,
+        iteration=iteration,
+        best_mean_reward=best_mean_reward,
         rng_state=rng_state.clone(),
     )

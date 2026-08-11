@@ -22,6 +22,9 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["action"]["maximum_retention_seconds"] == 20.0
     assert config["dppo"]["diffusion"]["steps"] == 20
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
+    assert config["dppo"]["training"]["iterations"] > 0
+    assert config["dppo"]["training"]["episodes_per_iteration"] > 0
+    assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
 
 
 def test_validate_config_rejects_dataset_fractions_not_summing_to_one() -> None:
@@ -97,4 +100,14 @@ def test_validate_config_requires_positive_pretraining_batch_size() -> None:
     }
 
     with pytest.raises(ValueError, match="pretraining.batch_size"):
+        validate_config(config)
+
+
+def test_validate_config_requires_positive_online_training_iterations() -> None:
+    """在线训练轮数不能依赖脚本默认值，也不能配置为零。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["training"]["iterations"] = 0
+
+    with pytest.raises(ValueError, match="dppo.training.iterations"):
         validate_config(config)

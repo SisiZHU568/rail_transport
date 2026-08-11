@@ -594,14 +594,23 @@ dppo:
 
   training:
     state_schema_version: dppo-v1-flat
+    # 在线训练的外层迭代次数和每次迭代收集的完整 Episode 数量。
+    iterations: 200
+    episodes_per_iteration: 8
     gamma: 0.99
     gae_lambda: 0.95
     clip_ratio: 0.20
     denoising_discount: 0.99
     policy_learning_rate: 0.0003
     value_learning_rate: 0.0003
+    # 价值网络结构独立配置，扩充状态维度时不需要修改 Python 源码。
+    value_hidden_dims:
+      - 256
+      - 256
     batch_size: 64
     update_epochs: 10
     gradient_clip_norm: 5.0
+    # Rollout 顺序、价值网络初始化和小批次打乱使用同一个实验种子。
+    seed: 13000
     device: cpu
     output_root: results/dppo/training

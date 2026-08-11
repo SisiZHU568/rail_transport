@@ -170,7 +170,78 @@ def validate_config(config: dict[str, Any]) -> None:
     if not isinstance(pretraining_output, str) or not pretraining_output:
         raise ValueError("dppo.pretraining.output_root 必须是非空字符串。")
 
-    _require_mapping(dppo, "training")
+    training = _require_mapping(dppo, "training")
+    state_schema_version = training.get("state_schema_version")
+    if not isinstance(state_schema_version, str) or not state_schema_version:
+        raise ValueError("dppo.training.state_schema_version 必须是非空字符串。")
+    for key in (
+        "iterations",
+        "episodes_per_iteration",
+        "batch_size",
+        "update_epochs",
+    ):
+        _require_positive_integer(
+            training,
+            key,
+            display_key=f"dppo.training.{key}",
+        )
+    bounded_values = {
+        "gamma": (0.0, 1.0, False),
+        "gae_lambda": (0.0, 1.0, True),
+        "clip_ratio": (0.0, 1.0, False),
+        "denoising_discount": (0.0, 1.0, False),
+    }
+    for key, (minimum, maximum, allow_zero) in bounded_values.items():
+        value = training.get(key)
+        valid_number = (
+            not isinstance(value, bool)
+            and isinstance(value, (int, float))
+            and math.isfinite(float(value))
+        )
+        lower_valid = (
+            float(value) >= minimum if valid_number and allow_zero
+            else valid_number and float(value) > minimum
+        )
+        if not lower_valid or float(value) > maximum:
+            left_bracket = "[" if allow_zero else "("
+            raise ValueError(
+                f"dppo.training.{key} 必须位于 {left_bracket}0, 1]。"
+            )
+    for key in (
+        "policy_learning_rate",
+        "value_learning_rate",
+        "gradient_clip_norm",
+    ):
+        value = training.get(key)
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        ):
+            raise ValueError(f"dppo.training.{key} 必须是正有限数。")
+    hidden_dims = training.get("value_hidden_dims")
+    if (
+        not isinstance(hidden_dims, list)
+        or not hidden_dims
+        or any(
+            isinstance(width, bool) or not isinstance(width, int) or width <= 0
+            for width in hidden_dims
+        )
+    ):
+        raise ValueError("dppo.training.value_hidden_dims 必须是非空正整数列表。")
+    training_seed = training.get("seed")
+    if (
+        isinstance(training_seed, bool)
+        or not isinstance(training_seed, int)
+        or training_seed < 0
+    ):
+        raise ValueError("dppo.training.seed 必须是非负整数。")
+    if training.get("device") not in {"cpu", "cuda"}:
+        raise ValueError("dppo.training.device 必须是 cpu 或 cuda。")
+    training_output = training.get("output_root")
+    if not isinstance(training_output, str) or not training_output:
+        raise ValueError("dppo.training.output_root 必须是非空字符串。")
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:

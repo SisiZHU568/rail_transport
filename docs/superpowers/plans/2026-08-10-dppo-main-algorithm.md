@@ -1196,7 +1196,7 @@ git commit -m "feat: add two-layer DPPO policy updates"
 - Modify: `src/dppo_slow_timescale_env.py`
 - Modify: `configs/debug.yaml`
 
-- [ ] **Step 1: Write failing one-rollout training test**
+- [x] **Step 1: Write failing one-rollout training test**
 
 Use a real small environment and pre-trained actor. Assert sampled raw action and chain are stored, clipped action reaches the decoder, reward is finite, projection failure remains a negative on-policy transition, update returns finite policy/value losses, and output stays under the supplied temporary root.
 
@@ -1215,11 +1215,11 @@ def test_collect_rollout_keeps_rejected_action_on_policy(
     assert np.isfinite(losses["value_loss"])
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run `pytest -q -p no:cacheprovider tests/test_dppo_training.py`; expect missing training helper.
 
-- [ ] **Step 3: Implement training helper and CLI**
+- [x] **Step 3: Implement training helper and CLI**
 
 Expose a testable `collect_rollout(environment, agent, rollout_buffer, seed)` and keep CLI orchestration in `main()`. Add `--iterations`, `--episodes-per-iteration`, `--pretrained-checkpoint`, `--output-root`, and `--device`. Save last/best checkpoints, CSV history, reward, policy loss, value loss, raw feasibility, projection rate, repair rate, and gradient norm.
 
@@ -1252,11 +1252,11 @@ def collect_rollout(
     return {"mean_reward": float(np.mean(rewards))}
 ```
 
-- [ ] **Step 4: Run one-iteration CPU smoke training**
+- [x] **Step 4: Run one-iteration CPU smoke training**
 
 Use temporary dataset/checkpoint/output roots. Expected: state/action dimensions printed from configuration, finite metrics, successful save/reload, and no repository result changes.
 
-- [ ] **Step 5: Commit online training**
+- [x] **Step 5: Commit online training**
 
 ```powershell
 git add run_dppo_training.py tests/test_dppo_training.py src/dppo_slow_timescale_env.py configs/debug.yaml
