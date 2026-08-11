@@ -18,23 +18,14 @@ class CosineNoiseSchedule:
         *,
         cosine_offset: float = 0.008,
         maximum_beta: float = 0.999,
-        minimum_reverse_standard_deviation: float = 1e-3,
     ) -> None:
-        """根据扩散步数构造前向噪声和反向采样所需常量。
-
-        最后一个反向步骤在标准 DDPM 中方差为零，但 DDPO/PPO 需要计算
-        有限的高斯对数概率，因此这里只对反向采样标准差设置数值下限。
-        """
+        """根据扩散步数构造前向噪声和反向采样所需常量。"""
 
         if isinstance(steps, bool) or not isinstance(steps, int) or steps <= 0:
             raise ValueError("steps 必须是正整数。")
         for name, value in (
             ("cosine_offset", cosine_offset),
             ("maximum_beta", maximum_beta),
-            (
-                "minimum_reverse_standard_deviation",
-                minimum_reverse_standard_deviation,
-            ),
         ):
             if isinstance(value, bool) or not math.isfinite(float(value)):
                 raise ValueError(f"{name} 必须是有限数。")
@@ -42,13 +33,8 @@ class CosineNoiseSchedule:
             raise ValueError("cosine_offset 不能小于零。")
         if not 0.0 < float(maximum_beta) < 1.0:
             raise ValueError("maximum_beta 必须位于 (0, 1)。")
-        if float(minimum_reverse_standard_deviation) <= 0.0:
-            raise ValueError("minimum_reverse_standard_deviation 必须大于零。")
 
         self.steps = steps
-        self.minimum_reverse_standard_deviation = float(
-            minimum_reverse_standard_deviation
-        )
         # 先计算 t=0...T 共 T+1 个累计信号比例，再转成每一步 beta。
         time_points = torch.linspace(0.0, 1.0, steps + 1, dtype=torch.float64)
         offset = float(cosine_offset)
@@ -162,17 +148,27 @@ class CosineNoiseSchedule:
         self,
         noisy_actions: torch.Tensor,
         timesteps: torch.Tensor,
+        *,
+        minimum_standard_deviation: float,
     ) -> torch.Tensor:
         """返回带数值下限且扩展到动作形状的反向标准差。"""
 
+        if (
+            isinstance(minimum_standard_deviation, bool)
+            or not math.isfinite(float(minimum_standard_deviation))
+            or float(minimum_standard_deviation) <= 0.0
+        ):
+            raise ValueError("minimum_standard_deviation 必须是大于零的有限数。")
         self._validate_timesteps(timesteps, noisy_actions.shape[0])
         variances = self._extract(
             self.posterior_variances,
             timesteps,
             noisy_actions,
         )
-        minimum_variance = self.minimum_reverse_standard_deviation**2
-        return variances.clamp_min(minimum_variance).sqrt().expand_as(noisy_actions)
+        standard_deviations = variances.sqrt()
+        return standard_deviations.clamp_min(
+            float(minimum_standard_deviation)
+        ).expand_as(noisy_actions)
 
 
 def sinusoidal_timestep_embedding(
@@ -345,6 +341,7 @@ def sample_denoising_chain(
     states: torch.Tensor,
     *,
     seed: int,
+    minimum_sampling_standard_deviation: float = 0.001,
 ) -> DenoisingSample:
     """从标准高斯 ``a_T`` 开始，采样并记录完整条件反向链。"""
 
@@ -394,6 +391,7 @@ def sample_denoising_chain(
             standard_deviations = schedule.reverse_standard_deviation(
                 current_actions,
                 timesteps,
+                minimum_standard_deviation=minimum_sampling_standard_deviation,
             )
             noise = torch.randn(
                 current_actions.shape,

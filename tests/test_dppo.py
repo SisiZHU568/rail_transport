@@ -172,6 +172,23 @@ def test_agent_assigns_first_15_steps_to_frozen_policy_and_last_5_to_trainable()
     assert all(parameter.requires_grad for parameter in agent.trainable_policy.parameters())
 
 
+def test_config_has_separate_validated_diffusion_standard_deviation_floors() -> None:
+    """训练探索、PPO 概率和独立评估必须拥有各自可校验的标准差下限。"""
+
+    config = DPPOConfig()
+
+    assert config.training_sampling_min_std == pytest.approx(0.01)
+    assert config.probability_min_std == pytest.approx(0.10)
+    assert config.evaluation_sampling_min_std == pytest.approx(0.001)
+    for field_name in (
+        "training_sampling_min_std",
+        "probability_min_std",
+        "evaluation_sampling_min_std",
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            DPPOConfig(**{field_name: 0.0})
+
+
 def test_seeded_hybrid_sampler_records_every_reverse_transition() -> None:
     """双层策略采样仍应返回初始噪声、全部中间动作和每步旧概率。"""
 
@@ -187,6 +204,55 @@ def test_seeded_hybrid_sampler_records_every_reverse_transition() -> None:
     assert torch.equal(first.log_probabilities, second.log_probabilities)
     assert torch.isfinite(first.actions).all()
     assert torch.isfinite(first.log_probabilities).all()
+
+
+def test_hybrid_sampler_separates_sampling_and_probability_floors() -> None:
+    """实际动作按 0.01 探索，但旧策略概率必须在同一动作上按 0.10 计算。"""
+
+    agent = _small_agent()
+    state = np.linspace(-1.0, 1.0, 6, dtype=np.float32)
+
+    sample = agent.sample_action(state, seed=53)
+    final_actions = sample.actions[-1]
+    final_means = sample.means[-1]
+    probability_standard_deviations = torch.full_like(final_means, 0.10)
+    sampling_standard_deviations = torch.full_like(final_means, 0.01)
+    expected_probability_logp = torch.distributions.Normal(
+        final_means,
+        probability_standard_deviations,
+    ).log_prob(final_actions).sum(dim=-1)
+    sampling_logp = torch.distributions.Normal(
+        final_means,
+        sampling_standard_deviations,
+    ).log_prob(final_actions).sum(dim=-1)
+
+    assert torch.all(sample.standard_deviations[-1] >= 0.01)
+    assert torch.allclose(sample.log_probabilities[-1], expected_probability_logp)
+    assert not torch.allclose(sample.log_probabilities[-1], sampling_logp)
+
+
+def test_current_trainable_log_probabilities_use_probability_floor() -> None:
+    """PPO 更新重算的新策略概率必须与采样时保存的旧策略使用同一 0.10 尺度。"""
+
+    agent = _small_agent()
+    states = torch.zeros((1, 6), dtype=torch.float32)
+    sample = agent.sample_action(states, seed=59)
+
+    current_log_probabilities = agent._current_trainable_log_probabilities(
+        states,
+        sample.actions.permute(1, 0, 2),
+    )
+    expected_final_logp = torch.distributions.Normal(
+        sample.means[-1],
+        torch.full_like(sample.means[-1], 0.10),
+    ).log_prob(sample.actions[-1]).sum(dim=-1)
+    sampling_final_logp = torch.distributions.Normal(
+        sample.means[-1],
+        torch.full_like(sample.means[-1], 0.01),
+    ).log_prob(sample.actions[-1]).sum(dim=-1)
+
+    assert torch.allclose(current_log_probabilities[:, -1], expected_final_logp)
+    assert not torch.allclose(current_log_probabilities[:, -1], sampling_final_logp)
 
 
 def test_update_changes_only_trainable_policy_and_clears_buffer() -> None:

@@ -48,6 +48,9 @@ class DPPOConfig:
     denoising_discount: float = 0.99
     policy_learning_rate: float = 3e-4
     value_learning_rate: float = 3e-4
+    training_sampling_min_std: float = 0.01
+    probability_min_std: float = 0.10
+    evaluation_sampling_min_std: float = 0.001
     batch_size: int = 64
     update_epochs: int = 10
     gradient_clip_norm: float = 5.0
@@ -78,6 +81,18 @@ class DPPOConfig:
             "gradient_clip_norm",
             self.gradient_clip_norm,
         )
+        training_sampling_min_std = _finite_float(
+            "training_sampling_min_std",
+            self.training_sampling_min_std,
+        )
+        probability_min_std = _finite_float(
+            "probability_min_std",
+            self.probability_min_std,
+        )
+        evaluation_sampling_min_std = _finite_float(
+            "evaluation_sampling_min_std",
+            self.evaluation_sampling_min_std,
+        )
         if not 0.0 < gamma <= 1.0:
             raise ValueError("gamma 必须位于 (0, 1]。")
         if not 0.0 <= gae_lambda <= 1.0:
@@ -90,6 +105,13 @@ class DPPOConfig:
             raise ValueError("策略和价值网络学习率必须大于零。")
         if gradient_clip_norm <= 0.0:
             raise ValueError("gradient_clip_norm 必须大于零。")
+        for name, value in (
+            ("training_sampling_min_std", training_sampling_min_std),
+            ("probability_min_std", probability_min_std),
+            ("evaluation_sampling_min_std", evaluation_sampling_min_std),
+        ):
+            if value <= 0.0:
+                raise ValueError(f"{name} 必须大于零。")
 
         diffusion_steps = _positive_integer("diffusion_steps", self.diffusion_steps)
         fine_tuned_steps = _positive_integer(
@@ -117,6 +139,17 @@ class DPPOConfig:
         object.__setattr__(self, "policy_learning_rate", policy_learning_rate)
         object.__setattr__(self, "value_learning_rate", value_learning_rate)
         object.__setattr__(self, "gradient_clip_norm", gradient_clip_norm)
+        object.__setattr__(
+            self,
+            "training_sampling_min_std",
+            training_sampling_min_std,
+        )
+        object.__setattr__(self, "probability_min_std", probability_min_std)
+        object.__setattr__(
+            self,
+            "evaluation_sampling_min_std",
+            evaluation_sampling_min_std,
+        )
         object.__setattr__(self, "value_hidden_dims", hidden_dims)
 
 
@@ -445,11 +478,14 @@ class DPPOAgent:
         states: np.ndarray | torch.Tensor,
         *,
         seed: int,
+        sampling_min_std: float | None = None,
     ) -> DenoisingSample:
         """由固定前段和可训练末段共同生成一条完整联合动作轨迹。"""
 
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValueError("seed 必须是非负整数。")
+        if sampling_min_std is None:
+            sampling_min_std = self.config.training_sampling_min_std
         state_tensor = self._state_tensor(states)
         parameter = next(self.trainable_policy.parameters())
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -486,9 +522,10 @@ class DPPOAgent:
                     predicted_noise,
                     timesteps,
                 )
-                standard_deviations = self.schedule.reverse_standard_deviation(
+                sampling_standard_deviations = self.schedule.reverse_standard_deviation(
                     current_actions,
                     timesteps,
+                    minimum_standard_deviation=sampling_min_std,
                 )
                 noise = torch.randn(
                     current_actions.shape,
@@ -496,15 +533,24 @@ class DPPOAgent:
                     device=self.device,
                     dtype=current_actions.dtype,
                 )
-                next_actions = means + standard_deviations * noise
+                next_actions = means + sampling_standard_deviations * noise
+                # 探索噪声决定实际送入环境的动作；PPO 概率尺度更宽，避免末步
+                # 极小采样方差把轻微策略变化放大成失控的概率比。
+                probability_standard_deviations = (
+                    self.schedule.reverse_standard_deviation(
+                        current_actions,
+                        timesteps,
+                        minimum_standard_deviation=self.config.probability_min_std,
+                    )
+                )
                 log_probabilities = _gaussian_log_probability(
                     next_actions,
                     means,
-                    standard_deviations,
+                    probability_standard_deviations,
                 )
                 action_history.append(next_actions)
                 mean_history.append(means)
-                deviation_history.append(standard_deviations)
+                deviation_history.append(sampling_standard_deviations)
                 log_probability_history.append(log_probabilities)
                 current_actions = next_actions
 
@@ -549,6 +595,7 @@ class DPPOAgent:
             standard_deviations = self.schedule.reverse_standard_deviation(
                 current_actions,
                 timesteps,
+                minimum_standard_deviation=self.config.probability_min_std,
             )
             log_probabilities.append(
                 _gaussian_log_probability(

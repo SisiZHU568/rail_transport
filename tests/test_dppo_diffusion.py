@@ -28,6 +28,44 @@ def test_cosine_schedule_has_finite_probabilities() -> None:
     )
 
 
+@pytest.mark.parametrize("minimum_standard_deviation", [0.001, 0.01, 0.10])
+def test_reverse_standard_deviation_uses_per_call_floor(
+    minimum_standard_deviation: float,
+) -> None:
+    """末步理论方差为零，因此每次调用传入的下限必须直接决定其标准差。"""
+
+    schedule = CosineNoiseSchedule(steps=20)
+    noisy_actions = torch.zeros((2, 3), dtype=torch.float32)
+    final_timesteps = torch.zeros(2, dtype=torch.long)
+
+    standard_deviations = schedule.reverse_standard_deviation(
+        noisy_actions,
+        final_timesteps,
+        minimum_standard_deviation=minimum_standard_deviation,
+    )
+
+    assert torch.allclose(
+        standard_deviations,
+        torch.full_like(noisy_actions, minimum_standard_deviation),
+    )
+
+
+@pytest.mark.parametrize("minimum_standard_deviation", [0.0, -0.01])
+def test_reverse_standard_deviation_rejects_nonpositive_floor(
+    minimum_standard_deviation: float,
+) -> None:
+    """标准差下限必须严格大于零，避免产生退化或无效的高斯分布。"""
+
+    schedule = CosineNoiseSchedule(steps=20)
+
+    with pytest.raises(ValueError, match="minimum_standard_deviation"):
+        schedule.reverse_standard_deviation(
+            torch.zeros((1, 2)),
+            torch.zeros(1, dtype=torch.long),
+            minimum_standard_deviation=minimum_standard_deviation,
+        )
+
+
 def test_q_sample_preserves_batch_action_shape_and_is_seeded() -> None:
     """前向加噪不得改变动作形状，同一噪声必须得到相同结果。"""
 
@@ -137,6 +175,33 @@ def test_seeded_denoising_chain_is_reproducible() -> None:
     assert torch.all(first.standard_deviations > 0.0)
     assert torch.isfinite(first.actions).all()
     assert torch.isfinite(first.log_probabilities).all()
+
+
+def test_denoising_chain_accepts_an_independent_sampling_floor() -> None:
+    """通用反向扩散可按调用场景覆盖采样下限，同时保持默认评估下限。"""
+
+    torch.manual_seed(37)
+    schedule = CosineNoiseSchedule(steps=4)
+    model = ConditionalDiffusionMLP(6, 3, (12, 12))
+    states = torch.zeros((1, 6), dtype=torch.float32)
+
+    default_sample = sample_denoising_chain(model, schedule, states, seed=43)
+    custom_sample = sample_denoising_chain(
+        model,
+        schedule,
+        states,
+        seed=43,
+        minimum_sampling_standard_deviation=0.02,
+    )
+
+    assert torch.allclose(
+        default_sample.standard_deviations[-1],
+        torch.full((1, 3), 0.001),
+    )
+    assert torch.allclose(
+        custom_sample.standard_deviations[-1],
+        torch.full((1, 3), 0.02),
+    )
 
 
 def test_different_sampling_seeds_change_initial_and_final_actions() -> None:
