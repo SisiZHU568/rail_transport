@@ -10,6 +10,7 @@ from src.entities import (
     ServicePriority,
     SFCType,
 )
+from src.fast_convex_scheduler import FastScheduledBatch
 from src.reliability import FaultDomainReliabilityModel
 from src.topology import LinearRailTopology, TracksideSite
 
@@ -199,3 +200,55 @@ def test_cloud_candidate_is_audited_as_known_compute_node() -> None:
         pytest.approx(0.998001)
     )
     assert audit.all_constraints_met is True
+
+
+def test_deployment_audit_rejects_failed_deployed_node() -> None:
+    """慢层部署引用当前故障节点时，不能进入快层数学求解。"""
+
+    audit = build_auditor().audit_deployment(
+        expected_replica_count={0: 1, 1: 1},
+        candidate_map={0: (0,), 1: (1,)},
+        function_hot_node_ids={0: (0,), 1: (1,)},
+        operational_node_ids=frozenset({0, 2, 3}),
+    )
+
+    assert audit.all_constraints_met is False
+    assert any("故障节点1" in reason for reason in audit.violation_reasons)
+
+
+def test_multi_path_audit_accumulates_integer_batch_cpu() -> None:
+    """最终审计必须累计所有路径批次，不能只检查第一条路径。"""
+
+    auditor = build_auditor()
+    auditor.node_map[0].cpu_capacity = 240.0
+    auditor.node_map[1].cpu_capacity = 120.0
+    audit = auditor.audit_scheduled_batches(
+        request_count=3,
+        expected_replica_count={0: 1, 1: 2},
+        candidate_map={0: (0,), 1: (0, 1)},
+        function_hot_node_ids={0: (), 1: ()},
+        scheduled_batches=(
+            FastScheduledBatch(1, (0, 0)),
+            FastScheduledBatch(2, (0, 1)),
+        ),
+    )
+
+    assert audit.node_cpu_demand == {0: 240.0, 1: 120.0}
+    assert audit.node_memory_demand_mb == {0: 1200.0, 1: 600.0}
+    assert audit.cpu_violation_node_ids == ()
+    assert audit.memory_violation_node_ids == (0,)
+
+
+def test_multi_path_audit_requires_request_conservation() -> None:
+    """整数批次少分或多分请求都必须被最终门禁拒绝。"""
+
+    audit = build_auditor().audit_scheduled_batches(
+        request_count=3,
+        expected_replica_count={0: 1, 1: 1},
+        candidate_map={0: (0,), 1: (1,)},
+        function_hot_node_ids={0: (0,), 1: (1,)},
+        scheduled_batches=(FastScheduledBatch(2, (0, 1)),),
+    )
+
+    assert audit.all_constraints_met is False
+    assert any("请求总数" in reason for reason in audit.violation_reasons)

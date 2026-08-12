@@ -1,6 +1,8 @@
 """快时隙资源、副本计划和可靠性硬约束审计。"""
 
 from collections.abc import Mapping
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
 from src.entities import (
     ServerlessFunction,
@@ -9,6 +11,9 @@ from src.entities import (
 )
 from src.reliability import FaultDomainReliabilityModel
 from src.topology import LinearRailTopology
+
+if TYPE_CHECKING:
+    from src.fast_convex_scheduler import FastScheduledBatch
 
 
 class SlotConstraintAuditor:
@@ -125,6 +130,162 @@ class SlotConstraintAuditor:
                 memory_demand_mb=memory.get(node_id, 0.0),
             )
             for node_id in referenced_node_ids
+        )
+
+    def audit_deployment(
+        self,
+        *,
+        expected_replica_count: int | Mapping[int, int],
+        candidate_map: dict[int, tuple[int, ...]],
+        function_hot_node_ids: dict[int, tuple[int, ...]],
+        operational_node_ids: frozenset[int],
+    ) -> SlotConstraintAudit:
+        """在求解前检查慢层部署，不把请求 CPU 混入部署约束。"""
+
+        audit = self.audit(
+            request_count=0,
+            expected_replica_count=expected_replica_count,
+            candidate_map=candidate_map,
+            selected_execution_node_ids=(),
+            request_success=None,
+            function_hot_node_ids=function_hot_node_ids,
+            cold_activated_pairs=set(),
+        )
+        failed_node_ids = tuple(
+            sorted(
+                {
+                    node_id
+                    for node_ids in candidate_map.values()
+                    for node_id in node_ids
+                    if node_id not in operational_node_ids
+                }
+            )
+        )
+        if not failed_node_ids:
+            return audit
+
+        reasons = list(audit.violation_reasons)
+        reasons.extend(
+            f"慢层部署引用当前故障节点{node_id}。"
+            for node_id in failed_node_ids
+        )
+        return replace(
+            audit,
+            replica_plan_valid=False,
+            all_constraints_met=False,
+            violation_reasons=tuple(reasons),
+        )
+
+    def audit_scheduled_batches(
+        self,
+        *,
+        request_count: int,
+        expected_replica_count: int | Mapping[int, int],
+        candidate_map: dict[int, tuple[int, ...]],
+        function_hot_node_ids: dict[int, tuple[int, ...]],
+        scheduled_batches: tuple["FastScheduledBatch", ...],
+    ) -> SlotConstraintAudit:
+        """累计全部整数路径批次，作为实际执行前的统一资源门禁。"""
+
+        if request_count < 0:
+            raise ValueError("请求数量不能小于0。")
+        # 先复用原有副本数量、部署结构和精确可靠性公式。
+        base_audit = self.audit(
+            request_count=0,
+            expected_replica_count=expected_replica_count,
+            candidate_map=candidate_map,
+            selected_execution_node_ids=(),
+            request_success=None,
+            function_hot_node_ids=function_hot_node_ids,
+            cold_activated_pairs=set(),
+        )
+        reasons = list(base_audit.violation_reasons)
+        schedule_valid = True
+        allocated_requests = sum(batch.request_count for batch in scheduled_batches)
+        if allocated_requests != request_count:
+            schedule_valid = False
+            reasons.append(
+                f"整数调度请求总数{allocated_requests}不等于到达请求数{request_count}。"
+            )
+        if request_count == 0 and scheduled_batches:
+            schedule_valid = False
+            reasons.append("无请求时整数调度批次必须为空。")
+
+        cpu: dict[int, float] = {}
+        active_pairs = {
+            (function_id, node_id)
+            for function_id, node_ids in function_hot_node_ids.items()
+            for node_id in node_ids
+        }
+        for batch in scheduled_batches:
+            path = batch.execution_node_ids
+            if len(path) != len(self.sfc.function_ids):
+                schedule_valid = False
+                reasons.append("整数调度路径未覆盖完整 SFC。")
+                continue
+            for function_id, node_id in zip(self.sfc.function_ids, path):
+                if node_id not in candidate_map.get(function_id, ()):
+                    schedule_valid = False
+                    reasons.append(
+                        f"函数{function_id}的调度节点{node_id}不属于慢层部署。"
+                    )
+                    continue
+                active_pairs.add((function_id, node_id))
+                cpu[node_id] = (
+                    cpu.get(node_id, 0.0)
+                    + self.function_map[function_id].cpu_demand(batch.request_count)
+                )
+
+        memory: dict[int, float] = {}
+        for function_id, node_id in active_pairs:
+            memory[node_id] = (
+                memory.get(node_id, 0.0)
+                + self.function_map[function_id].memory_mb
+            )
+        cpu_violations = tuple(
+            sorted(
+                node_id
+                for node_id, demand in cpu.items()
+                if node_id not in self.node_map
+                or demand > self.node_map[node_id].cpu_capacity
+            )
+        )
+        memory_violations = tuple(
+            sorted(
+                node_id
+                for node_id, demand in memory.items()
+                if node_id not in self.node_map
+                or demand > self.node_map[node_id].memory_capacity_mb
+            )
+        )
+        for node_id in cpu_violations:
+            if node_id in self.node_map:
+                reasons.append(
+                    f"节点{node_id}的CPU需求{cpu[node_id]:.3f}超过容量"
+                    f"{self.node_map[node_id].cpu_capacity:.3f}。"
+                )
+        for node_id in memory_violations:
+            if node_id in self.node_map:
+                reasons.append(
+                    f"节点{node_id}的内存需求{memory[node_id]:.3f}MB超过容量"
+                    f"{self.node_map[node_id].memory_capacity_mb:.3f}MB。"
+                )
+
+        resource_met = not (cpu_violations or memory_violations)
+        return replace(
+            base_audit,
+            node_cpu_demand=dict(sorted(cpu.items())),
+            node_memory_demand_mb=dict(sorted(memory.items())),
+            cpu_violation_node_ids=cpu_violations,
+            memory_violation_node_ids=memory_violations,
+            resource_constraints_met=resource_met,
+            all_constraints_met=(
+                schedule_valid
+                and resource_met
+                and base_audit.replica_plan_valid
+                and base_audit.reliability_target_met
+            ),
+            violation_reasons=tuple(reasons),
         )
 
     def audit(
