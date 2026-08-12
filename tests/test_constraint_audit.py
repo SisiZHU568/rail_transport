@@ -202,18 +202,31 @@ def test_cloud_candidate_is_audited_as_known_compute_node() -> None:
     assert audit.all_constraints_met is True
 
 
-def test_deployment_audit_rejects_failed_deployed_node() -> None:
-    """慢层部署引用当前故障节点时，不能进入快层数学求解。"""
+def test_deployment_audit_allows_redundancy_after_one_replica_fails() -> None:
+    """一个副本故障后仍有正常副本时，主备部署仍可进入快层。"""
+
+    audit = build_auditor().audit_deployment(
+        expected_replica_count={0: 2, 1: 2},
+        candidate_map={0: (0, 1), 1: (1, 2)},
+        function_hot_node_ids={0: (0,), 1: (2,)},
+        operational_node_ids=frozenset({0, 2, 3}),
+    )
+
+    assert audit.all_constraints_met is True
+
+
+def test_deployment_audit_rejects_function_with_no_operational_replica() -> None:
+    """某个 VNF 的所有副本都故障时，完整 SFC 已无法执行。"""
 
     audit = build_auditor().audit_deployment(
         expected_replica_count={0: 1, 1: 1},
         candidate_map={0: (0,), 1: (1,)},
-        function_hot_node_ids={0: (0,), 1: (1,)},
+        function_hot_node_ids={0: (0,), 1: ()},
         operational_node_ids=frozenset({0, 2, 3}),
     )
 
     assert audit.all_constraints_met is False
-    assert any("故障节点1" in reason for reason in audit.violation_reasons)
+    assert any("函数1" in reason and "正常副本" in reason for reason in audit.violation_reasons)
 
 
 def test_multi_path_audit_accumulates_integer_batch_cpu() -> None:

@@ -151,23 +151,21 @@ class SlotConstraintAuditor:
             function_hot_node_ids=function_hot_node_ids,
             cold_activated_pairs=set(),
         )
-        failed_node_ids = tuple(
-            sorted(
-                {
-                    node_id
-                    for node_ids in candidate_map.values()
-                    for node_id in node_ids
-                    if node_id not in operational_node_ids
-                }
+        unavailable_function_ids = tuple(
+            function_id
+            for function_id in self.sfc.function_ids
+            if not any(
+                node_id in operational_node_ids
+                for node_id in candidate_map.get(function_id, ())
             )
         )
-        if not failed_node_ids:
+        if not unavailable_function_ids:
             return audit
 
         reasons = list(audit.violation_reasons)
         reasons.extend(
-            f"慢层部署引用当前故障节点{node_id}。"
-            for node_id in failed_node_ids
+            f"函数{function_id}当前没有正常副本，无法组成完整 SFC。"
+            for function_id in unavailable_function_ids
         )
         return replace(
             audit,
