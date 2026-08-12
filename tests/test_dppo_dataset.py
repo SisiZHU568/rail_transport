@@ -17,12 +17,16 @@ from src.dppo_dataset import (
     save_expert_dataset,
     split_records_by_episode,
 )
+from src.dppo_scenario import build_dppo_scenario
+from src.dppo_teacher import build_simulation_teacher
 
 
 def _record(
     seed: int,
     *,
     slow_step: int = 0,
+    teacher_proposal_raw_feasible: bool | None = None,
+    expert_action_feasible: bool | None = None,
     final_feasible: bool = True,
     reasons: tuple[str, ...] = (),
 ) -> ExpertTransitionRecord:
@@ -34,7 +38,16 @@ def _record(
         teacher_name="cost",
         episode_seed=seed,
         slow_step=slow_step,
-        raw_feasible=final_feasible,
+        teacher_proposal_raw_feasible=(
+            final_feasible
+            if teacher_proposal_raw_feasible is None
+            else teacher_proposal_raw_feasible
+        ),
+        expert_action_feasible=(
+            final_feasible
+            if expert_action_feasible is None
+            else expert_action_feasible
+        ),
         projection_change_ratio=0.0 if final_feasible else 0.5,
         final_feasible=final_feasible,
         run_cost=1.0,
@@ -103,8 +116,15 @@ def test_rejected_records_stay_in_diagnostics_not_behavior_cloning(
         final_feasible=False,
         reasons=("sla_violations=1",),
     )
+    infeasible_label = _record(
+        12,
+        teacher_proposal_raw_feasible=False,
+        expert_action_feasible=False,
+        final_feasible=True,
+        reasons=("expert_action_not_raw_feasible",),
+    )
     partitions = {
-        "train": (accepted, rejected),
+        "train": (accepted, rejected, infeasible_label),
         "validation": (),
         "test": (),
     }
@@ -115,12 +135,17 @@ def test_rejected_records_stay_in_diagnostics_not_behavior_cloning(
     assert loaded.partitions["train"] == (accepted,)
     assert loaded.partitions["validation"] == ()
     assert loaded.partitions["test"] == ()
-    assert len(loaded.diagnostics) == 1
+    assert len(loaded.diagnostics) == 2
     assert loaded.diagnostics[0].record == rejected
     assert loaded.diagnostics[0].partition == "train"
     assert loaded.diagnostics[0].record.rejection_reasons == (
         "sla_violations=1",
     )
+    assert loaded.diagnostics[1].record.rejection_reasons == (
+        "expert_action_not_raw_feasible",
+    )
+    assert loaded.diagnostics[1].record == infeasible_label
+    assert loaded.diagnostics[1].record.expert_action_feasible is False
 
 
 def test_save_load_preserves_arrays_and_schema_versions(tmp_path) -> None:
@@ -150,6 +175,11 @@ def test_save_load_preserves_arrays_and_schema_versions(tmp_path) -> None:
         assert actual.expert_action.dtype == np.float32
         np.testing.assert_array_equal(actual.state, expected.state)
         np.testing.assert_array_equal(actual.expert_action, expected.expert_action)
+        assert (
+            actual.teacher_proposal_raw_feasible
+            is expected.teacher_proposal_raw_feasible
+        )
+        assert actual.expert_action_feasible is expected.expert_action_feasible
 
 
 def test_save_rejects_record_dimension_mismatch(tmp_path) -> None:
@@ -161,7 +191,8 @@ def test_save_rejects_record_dimension_mismatch(tmp_path) -> None:
         teacher_name="cost",
         episode_seed=1,
         slow_step=0,
-        raw_feasible=True,
+        teacher_proposal_raw_feasible=True,
+        expert_action_feasible=True,
         projection_change_ratio=0.0,
         final_feasible=True,
         run_cost=0.0,
@@ -231,6 +262,57 @@ def test_collect_one_cost_teacher_step_uses_online_environment() -> None:
     assert record.expert_action.shape == (27,)
     assert np.isfinite(record.state).all()
     assert np.isfinite(record.expert_action).all()
+
+
+def test_collector_reencodes_projected_intent_as_feasible_v2_label() -> None:
+    """教师原建议可不可行与最终监督标签是否可行必须分开记录。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["dataset"]["teacher_names"] = ["cost"]
+    config["dppo"]["dataset"]["max_slow_steps_per_episode"] = 2
+
+    records = collect_expert_records(
+        config,
+        episode_count=1,
+        seed_start=42000,
+    )
+
+    accepted = next(record for record in records if record.final_feasible)
+    assert EXPERT_DATASET_SCHEMA_VERSION == "dppo-expert-v2"
+    assert accepted.teacher_proposal_raw_feasible is False
+    assert accepted.expert_action_feasible is True
+    assert accepted.projection_change_ratio > 0.0
+
+    # 用同一 seed 重放到该慢步，直接核对标签的排名语义：投影选中的节点
+    # 必须位于最前面，其余节点继续保持教师原始顺序。
+    scenario = build_dppo_scenario(config)
+    scenario.reset(seed=42000)
+    teacher = build_simulation_teacher("cost", scenario)
+    for slow_step in range(accepted.slow_step + 1):
+        proposal = teacher.propose(scenario.current_public_snapshot())
+        _, _, _, _, info = scenario.step(proposal.relaxed_action)
+        if slow_step != accepted.slow_step:
+            continue
+        projection = info["projection_result"]
+        corrected = scenario.action_space.decode(accepted.expert_action)
+        original_by_function = {
+            action.function_id: action
+            for action in proposal.decoded_action.function_actions
+        }
+        corrected_by_function = {
+            action.function_id: action for action in corrected.function_actions
+        }
+        for intent in projection.function_intents:
+            selected = tuple(intent.preferred_node_ids)
+            corrected_ranking = corrected_by_function[intent.function_id].ranked_node_ids
+            assert corrected_ranking[: len(selected)] == selected
+            assert corrected_ranking[len(selected) :] == tuple(
+                node_id
+                for node_id in original_by_function[
+                    intent.function_id
+                ].ranked_node_ids
+                if node_id not in set(selected)
+            )
 
 
 def test_dataset_cli_requires_explicit_output_root() -> None:

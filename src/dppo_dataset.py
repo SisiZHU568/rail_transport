@@ -9,12 +9,13 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from src.dppo_action_space import DecodedFunctionAction
 from src.dppo_scenario import build_dppo_scenario
 from src.dppo_state_encoder import DPPO_STATE_SCHEMA_VERSION
 from src.dppo_teacher import build_simulation_teacher
 
 
-EXPERT_DATASET_SCHEMA_VERSION = "dppo-expert-v1"
+EXPERT_DATASET_SCHEMA_VERSION = "dppo-expert-v2"
 _PARTITION_NAMES = ("train", "validation", "test")
 
 
@@ -27,7 +28,8 @@ class ExpertTransitionRecord:
     teacher_name: str
     episode_seed: int
     slow_step: int
-    raw_feasible: bool
+    teacher_proposal_raw_feasible: bool
+    expert_action_feasible: bool
     projection_change_ratio: float
     final_feasible: bool
     run_cost: float
@@ -48,8 +50,10 @@ class ExpertTransitionRecord:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} 必须是非负整数。")
-        if not isinstance(self.raw_feasible, bool):
-            raise ValueError("raw_feasible 必须是布尔值。")
+        if not isinstance(self.teacher_proposal_raw_feasible, bool):
+            raise ValueError("teacher_proposal_raw_feasible 必须是布尔值。")
+        if not isinstance(self.expert_action_feasible, bool):
+            raise ValueError("expert_action_feasible 必须是布尔值。")
         if not isinstance(self.final_feasible, bool):
             raise ValueError("final_feasible 必须是布尔值。")
         ratio = float(self.projection_change_ratio)
@@ -64,8 +68,8 @@ class ExpertTransitionRecord:
         reasons = tuple(self.rejection_reasons)
         if any(not isinstance(reason, str) or not reason for reason in reasons):
             raise ValueError("rejection_reasons 必须由非空字符串组成。")
-        if self.final_feasible and reasons:
-            raise ValueError("最终可行记录不能包含拒绝原因。")
+        if self.final_feasible and self.expert_action_feasible and reasons:
+            raise ValueError("可用于行为克隆的记录不能包含拒绝原因。")
         object.__setattr__(self, "rejection_reasons", reasons)
 
     @staticmethod
@@ -90,7 +94,8 @@ class ExpertTransitionRecord:
             "teacher_name",
             "episode_seed",
             "slow_step",
-            "raw_feasible",
+            "teacher_proposal_raw_feasible",
+            "expert_action_feasible",
             "projection_change_ratio",
             "final_feasible",
             "run_cost",
@@ -294,8 +299,12 @@ def _records_to_arrays(
         "slow_steps": np.asarray(
             [record.slow_step for record in records], dtype=np.int64
         ),
-        "raw_feasible": np.asarray(
-            [record.raw_feasible for record in records], dtype=np.bool_
+        "teacher_proposal_raw_feasible": np.asarray(
+            [record.teacher_proposal_raw_feasible for record in records],
+            dtype=np.bool_,
+        ),
+        "expert_action_feasible": np.asarray(
+            [record.expert_action_feasible for record in records], dtype=np.bool_
         ),
         "projection_change_ratios": np.asarray(
             [record.projection_change_ratio for record in records], dtype=np.float64
@@ -330,7 +339,12 @@ def _arrays_to_records(path: Path) -> tuple[ExpertTransitionRecord, ...]:
                 teacher_name=str(arrays["teacher_names"][index]),
                 episode_seed=int(arrays["episode_seeds"][index]),
                 slow_step=int(arrays["slow_steps"][index]),
-                raw_feasible=bool(arrays["raw_feasible"][index]),
+                teacher_proposal_raw_feasible=bool(
+                    arrays["teacher_proposal_raw_feasible"][index]
+                ),
+                expert_action_feasible=bool(
+                    arrays["expert_action_feasible"][index]
+                ),
                 projection_change_ratio=float(
                     arrays["projection_change_ratios"][index]
                 ),
@@ -361,9 +375,16 @@ def save_expert_dataset(
     diagnostics: list[tuple[str, ExpertTransitionRecord]] = []
     behavior_counts: dict[str, int] = {}
     for name in _PARTITION_NAMES:
-        accepted = tuple(record for record in normalized[name] if record.final_feasible)
+        # 行为克隆只学习“标签本身可行且执行结果也可行”的样本。
+        accepted = tuple(
+            record
+            for record in normalized[name]
+            if record.expert_action_feasible and record.final_feasible
+        )
         diagnostics.extend(
-            (name, record) for record in normalized[name] if not record.final_feasible
+            (name, record)
+            for record in normalized[name]
+            if not (record.expert_action_feasible and record.final_feasible)
         )
         behavior_counts[name] = len(accepted)
         np.savez_compressed(root / f"{name}.npz", **_records_to_arrays(accepted, metadata))
@@ -460,6 +481,56 @@ def _rejection_reasons(info: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+def _reencode_projected_expert_action(
+    scenario: Any,
+    proposal: Any,
+    projection: Any,
+    projection_inputs: Any,
+) -> tuple[np.ndarray, bool]:
+    """把投影后的节点前缀重新编码为可用于行为克隆的完整连续动作。
+
+    投影意图只保存实际副本节点；其余节点仍按教师原排名补齐。这样只修正
+    违反硬约束的节点选择，不会额外改变教师的副本数和保留时间设计。
+    """
+
+    if not projection.success or projection.function_intents is None:
+        return proposal.relaxed_action, False
+
+    original_by_function = {
+        action.function_id: action
+        for action in proposal.decoded_action.function_actions
+    }
+    corrected_actions: list[DecodedFunctionAction] = []
+    for intent in projection.function_intents:
+        original = original_by_function[intent.function_id]
+        selected = tuple(intent.preferred_node_ids)
+        selected_set = set(selected)
+        complete_ranking = selected + tuple(
+            node_id
+            for node_id in original.ranked_node_ids
+            if node_id not in selected_set
+        )
+        corrected_actions.append(
+            DecodedFunctionAction(
+                function_id=intent.function_id,
+                ranked_node_ids=complete_ranking,
+                replica_count=intent.replica_count,
+                primary_retention_seconds=intent.primary_retention_seconds,
+                backup_retention_seconds=intent.backup_retention_seconds,
+            )
+        )
+
+    corrected = scenario.action_space.encode_teacher_action(corrected_actions)
+    verification = scenario.projector.project(
+        decoded_action=scenario.action_space.decode(corrected),
+        operational_node_ids=projection_inputs.operational_node_ids,
+        free_cpu=projection_inputs.free_cpu,
+        free_memory_mb=projection_inputs.free_memory_mb,
+        fault_domains=projection_inputs.fault_domains,
+    )
+    return corrected, bool(verification.raw_feasible)
+
+
 def collect_expert_records(
     config: dict[str, Any],
     *,
@@ -495,10 +566,21 @@ def collect_expert_records(
         state = scenario.reset(seed=episode_seed)
         for slow_step in range(maximum_steps):
             proposal = teacher.propose(scenario.current_public_snapshot())
+            # 必须在执行窗口前保存投影输入；执行后资源与故障状态已经变化，
+            # 不能再用未来快照验证当前教师标签。
+            projection_inputs = scenario.execution_core.current_projection_inputs()
             next_state, _, terminated, truncated, info = scenario.step(
                 proposal.relaxed_action
             )
             projection = info["projection_result"]
+            expert_action, expert_action_feasible = (
+                _reencode_projected_expert_action(
+                    scenario,
+                    proposal,
+                    projection,
+                    projection_inputs,
+                )
+            )
             breakdown = info["reward_breakdown"]
             final_feasible = bool(
                 projection.success and breakdown.violation_penalty == 0.0
@@ -506,18 +588,21 @@ def collect_expert_records(
             records.append(
                 ExpertTransitionRecord(
                     state=state,
-                    expert_action=proposal.relaxed_action,
+                    expert_action=expert_action,
                     teacher_name=teacher_name,
                     episode_seed=episode_seed,
                     slow_step=slow_step,
-                    raw_feasible=projection.raw_feasible,
+                    teacher_proposal_raw_feasible=projection.raw_feasible,
+                    expert_action_feasible=expert_action_feasible,
                     projection_change_ratio=projection.change_ratio,
                     final_feasible=final_feasible,
                     run_cost=breakdown.run_cost,
                     route_cost=breakdown.route_cost,
                     cold_start_cost=breakdown.cold_start_cost,
                     rejection_reasons=(
-                        () if final_feasible else _rejection_reasons(info)
+                        ("expert_action_not_raw_feasible",)
+                        if not expert_action_feasible
+                        else (() if final_feasible else _rejection_reasons(info))
                     ),
                 )
             )
