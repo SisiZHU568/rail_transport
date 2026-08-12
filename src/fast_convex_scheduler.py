@@ -23,7 +23,11 @@ class FastScheduledBatch:
     execution_node_ids: tuple[int, ...]
 
     def __post_init__(self) -> None:
-        if isinstance(self.request_count, bool) or self.request_count <= 0:
+        if (
+            isinstance(self.request_count, bool)
+            or not isinstance(self.request_count, int)
+            or self.request_count <= 0
+        ):
             raise ValueError("调度批次的请求数必须是正整数。")
         if not self.execution_node_ids:
             raise ValueError("调度批次必须包含完整执行路径。")

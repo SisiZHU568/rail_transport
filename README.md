@@ -41,3 +41,22 @@ python run_dppo_training.py --config configs/debug.yaml --iterations 2 --episode
 成功后，`online` 目录应包含 `dppo_online_best.pt`、
 `dppo_online_last.pt` 和 `training_history.csv`。debug 配置只用于快速验证；
 论文实验应使用独立配置扩大数据量、校准 Episode 和在线训练迭代数。
+
+### 双时间尺度主算法
+
+- 慢层 DPPO 一次生成整条 SFC 的副本数量、部署节点和保留时间；
+- 快层 CVXPY + CLARABEL 只在这些已部署副本之间分配当前请求；
+- 一个快时隙的请求可以拆分到多条完整 SFC 路径；
+- CLARABEL 未返回严格 `optimal` 时直接拒绝，不调用旧枚举器或其他求解器。
+
+DPPO 神经网络可通过 `dppo.training.device: cuda` 使用 GPU；CLARABEL 数学
+求解始终使用 CPU。快层配置位于 `dppo.fast_scheduler`。环境中的
+`fast_solver_status`、`fast_solver_objective_value`、`fast_solver_time_seconds`
+和 `fast_scheduled_execution_node_ids` 可用于论文记录。连续目标值是取整前的
+松弛解指标，最终实验成本仍以整数批次的真实执行结果为准。
+
+检查本机求解环境：
+
+```powershell
+python -c "import cvxpy as cp; print(cp.__version__, cp.installed_solvers())"
+```

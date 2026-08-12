@@ -1,6 +1,6 @@
 """训练环境与规则仿真器共用的单快时隙执行闭环。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 from src.continuous_retention import ContinuousRetentionTracker
@@ -13,6 +13,11 @@ from src.entities import (
     TrainState,
 )
 from src.failure_process import InfrastructureState
+from src.fast_convex_scheduler import (
+    FastConvexScheduler,
+    FastConvexSchedulingResult,
+    FastScheduledBatch,
+)
 from src.fast_optimizer import FastFeasibilityOptimizer
 from src.network import TransferNetworkProtocol
 from src.deployment_policies import RetentionPolicy
@@ -120,6 +125,13 @@ class FastSlotExecutionResult:
     failover_delay_ms: float = 0.0
     active_instance_count: int = 0
     fast_repair_evaluated_candidate_count: int = 0
+    # 多路径字段是论文实验的正式输出；上面的单路径字段仅保留兼容性。
+    fast_solver_status: str = "not_used"
+    fast_solver_objective_value: float | None = None
+    fast_solver_time_seconds: float = 0.0
+    scheduled_request_counts: tuple[int, ...] = ()
+    scheduled_execution_node_ids: tuple[tuple[int, ...], ...] = ()
+    cold_start_function_node_pairs: tuple[tuple[int, int], ...] = ()
 
     @property
     def total_cost(self) -> float:
@@ -150,6 +162,7 @@ class FastSlotExecutor:
         failover_delay_ms_per_function: float,
         cost_rates: RuntimeCostRates,
         return_result_to_source: bool = True,
+        fast_convex_scheduler: FastConvexScheduler | None = None,
     ) -> None:
         """保存快时隙闭环所需的唯一一组依赖。"""
 
@@ -189,6 +202,7 @@ class FastSlotExecutor:
         self.replica_planners = dict(replica_planners)
         self.constraint_auditor = constraint_auditor
         self.fast_optimizer = fast_optimizer
+        self.fast_convex_scheduler = fast_convex_scheduler
         self.input_size_mb_per_request = (
             input_size_mb_per_request
         )
@@ -636,44 +650,103 @@ class FastSlotExecutor:
             candidate_map=candidate_map,
             decision=initial_decision,
         )
-        optimization = self.fast_optimizer.optimize(
-            state=fast_state,
-            slow_decision=slot_input.slow_decision,
-            initial_decision=initial_decision,
-            initial_audit=initial_audit,
-            expected_replica_counts=(
-                None
-                if slot_input.deployment_intent is None
-                else expected_replica_counts
-            ),
-            allow_cloud=(
-                None
-                if slot_input.deployment_intent is None
-                else True
-            ),
-            retained_hot_node_ids=(
-                None
-                if slot_input.deployment_intent is None
-                else {
-                    function_id: tuple(sorted(node_ids))
-                    for function_id, node_ids in retained_hot_sets.items()
-                }
-            ),
-            retention_role_flags=(
-                None
-                if slot_input.deployment_intent is None
-                else retention_role_flags
-            ),
-        )
+        convex_result: FastConvexSchedulingResult | None = None
+        scheduled_batches = ()
 
-        # 后续执行、SLA、资源和成本只能读取优化器给出的最终方案。
-        final_candidate_map = dict(
-            optimization.function_replica_node_ids
-        )
-        final_decision = optimization.decision
-        final_audit = optimization.final_audit
+        if slot_input.deployment_intent is None:
+            # 历史规则入口继续使用旧修复器；这条分支绝不会作为 DPPO
+            # 数学求解失败后的回退路径。
+            optimization = self.fast_optimizer.optimize(
+                state=fast_state,
+                slow_decision=slot_input.slow_decision,
+                initial_decision=initial_decision,
+                initial_audit=initial_audit,
+            )
+            final_candidate_map = dict(optimization.function_replica_node_ids)
+            final_decision = optimization.decision
+            final_audit = optimization.final_audit
+            repair_attempted = optimization.attempted
+            repair_succeeded = optimization.succeeded
+            repair_reason = optimization.reason
+            evaluated_candidate_count = optimization.evaluated_candidate_count
+        else:
+            if self.fast_convex_scheduler is None:
+                raise RuntimeError(
+                    "DPPO explicit intent requires FastConvexScheduler."
+                )
+            deployment_audit = self.constraint_auditor.audit_deployment(
+                expected_replica_count=expected_replica_counts,
+                candidate_map=candidate_map,
+                function_hot_node_ids=initial_decision.function_hot_node_ids,
+                operational_node_ids=operational_node_ids,
+            )
+            initial_audit = deployment_audit
+            if deployment_audit.all_constraints_met:
+                convex_result = self.fast_convex_scheduler.schedule(
+                    state=fast_state,
+                    function_hot_node_ids=initial_decision.function_hot_node_ids,
+                )
+            else:
+                convex_result = FastConvexSchedulingResult(
+                    succeeded=False,
+                    solver_status="not_run",
+                    objective_value=None,
+                    solve_time_seconds=0.0,
+                    path_node_ids=(),
+                    path_fractions=(),
+                    scheduled_batches=(),
+                    reason="慢层部署审计未通过，未调用 CLARABEL。",
+                )
+            scheduled_batches = convex_result.scheduled_batches
+            final_candidate_map = dict(candidate_map)
+            final_audit = self.constraint_auditor.audit_scheduled_batches(
+                request_count=slot_input.request_count,
+                expected_replica_count=expected_replica_counts,
+                candidate_map=final_candidate_map,
+                function_hot_node_ids=initial_decision.function_hot_node_ids,
+                scheduled_batches=scheduled_batches,
+            )
+            representative_path = (
+                scheduled_batches[0].execution_node_ids
+                if scheduled_batches
+                else ()
+            )
+            if slot_input.request_count == 0 and convex_result.succeeded:
+                request_success: bool | None = None
+            else:
+                request_success = bool(
+                    convex_result.succeeded and final_audit.all_constraints_met
+                )
+            final_decision = replace(
+                initial_decision,
+                selected_execution_node_ids=representative_path,
+                failover_function_ids=tuple(
+                    function_id
+                    for function_id, node_id in zip(
+                        self.sfc.function_ids,
+                        representative_path,
+                    )
+                    if node_id != candidate_map[function_id][0]
+                ),
+                cold_start_function_ids=tuple(
+                    function_id
+                    for function_id, node_id in zip(
+                        self.sfc.function_ids,
+                        representative_path,
+                    )
+                    if node_id
+                    not in initial_decision.function_hot_node_ids[function_id]
+                ),
+                unavailable_function_ids=(),
+                request_success=request_success,
+            )
+            repair_attempted = slot_input.request_count > 0
+            repair_succeeded = convex_result.succeeded
+            repair_reason = convex_result.reason
+            evaluated_candidate_count = len(convex_result.path_node_ids)
+
         constraint_rejected = (
-            optimization.succeeded is False
+            repair_succeeded is False
             or not final_audit.all_constraints_met
             or (
                 slot_input.request_count > 0
@@ -704,6 +777,10 @@ class FastSlotExecutor:
         cold_start_delay_ms = 0.0
         failover_delay_ms = 0.0
         route_cost = 0.0
+        cold_start_pairs: set[tuple[int, int]] = set()
+        all_failover_function_ids: set[int] = set(
+            final_decision.failover_function_ids
+        )
 
         # 这是安全边界：只有最终审计可行且执行路径完整，才调用
         # 真实SFC执行器，杜绝“先执行、后发现约束违规”。
@@ -711,46 +788,80 @@ class FastSlotExecutor:
             not constraint_rejected
             and final_decision.request_success is True
         ):
-            sfc_result = execute_sfc_batch(
-                functions=self.functions,
-                sfc=self.sfc,
-                placement_node_ids=list(
-                    final_decision.selected_execution_node_ids
-                ),
-                source_node_id=train_state.serving_mec,
-                input_size_mb_per_request=(
-                    self.input_size_mb_per_request
-                ),
-                request_count=slot_input.request_count,
-                network=self.network,
-                cold_start_function_ids=set(
-                    final_decision.cold_start_function_ids
-                ),
-                return_result_to_source=(
-                    self.return_result_to_source
-                ),
+            batches_to_execute = (
+                scheduled_batches
+                if convex_result is not None
+                else (
+                    # 历史单路径执行也转换为统一批次循环，避免维护两套计费公式。
+                    FastScheduledBatch(
+                        slot_input.request_count,
+                        final_decision.selected_execution_node_ids,
+                    ),
+                )
             )
+            weighted_delay = 0.0
+            weighted_transmission = 0.0
+            weighted_execution = 0.0
+            for batch in batches_to_execute:
+                batch_cold_ids: set[int] = set()
+                for function_id, node_id in zip(
+                    self.sfc.function_ids,
+                    batch.execution_node_ids,
+                ):
+                    if node_id != candidate_map[function_id][0]:
+                        all_failover_function_ids.add(function_id)
+                    pair = (function_id, node_id)
+                    if (
+                        node_id not in initial_decision.function_hot_node_ids[function_id]
+                        and pair not in cold_start_pairs
+                    ):
+                        batch_cold_ids.add(function_id)
+                        cold_start_pairs.add(pair)
+
+                sfc_result = execute_sfc_batch(
+                    functions=self.functions,
+                    sfc=self.sfc,
+                    placement_node_ids=list(batch.execution_node_ids),
+                    source_node_id=train_state.serving_mec,
+                    input_size_mb_per_request=self.input_size_mb_per_request,
+                    request_count=batch.request_count,
+                    network=self.network,
+                    cold_start_function_ids=batch_cold_ids,
+                    return_result_to_source=self.return_result_to_source,
+                )
+                batch_failover_delay = (
+                    sum(
+                        node_id != candidate_map[function_id][0]
+                        for function_id, node_id in zip(
+                            self.sfc.function_ids,
+                            batch.execution_node_ids,
+                        )
+                    )
+                    * self.failover_delay_ms_per_function
+                )
+                batch_delay = (
+                    sfc_result.total_end_to_end_delay_ms
+                    + batch_failover_delay
+                )
+                weighted_delay += batch_delay * batch.request_count
+                weighted_transmission += (
+                    sfc_result.total_transmission_delay_ms
+                    * batch.request_count
+                )
+                weighted_execution += (
+                    sfc_result.total_execution_delay_ms
+                    * batch.request_count
+                )
+                failover_delay_ms += batch_failover_delay
+                cold_start_delay_ms += sfc_result.total_cold_start_delay_ms
+                route_cost += sfc_result.total_routing_cost
+
+            end_to_end_delay_ms = weighted_delay / slot_input.request_count
             transmission_delay_ms = (
-                sfc_result.total_transmission_delay_ms
+                weighted_transmission / slot_input.request_count
             )
-            execution_delay_ms = (
-                sfc_result.total_execution_delay_ms
-            )
-            failover_delay_ms = (
-                len(final_decision.failover_function_ids)
-                * self.failover_delay_ms_per_function
-            )
-            end_to_end_delay_ms = (
-                sfc_result.total_end_to_end_delay_ms
-                + failover_delay_ms
-            )
-            deadline_met = (
-                end_to_end_delay_ms <= self.sfc.deadline_ms
-            )
-            cold_start_delay_ms = (
-                sfc_result.total_cold_start_delay_ms
-            )
-            route_cost = sfc_result.total_routing_cost
+            execution_delay_ms = weighted_execution / slot_input.request_count
+            deadline_met = end_to_end_delay_ms <= self.sfc.deadline_ms
 
         active_pairs = {
             (function_id, node_id)
@@ -761,6 +872,7 @@ class FastSlotExecutor:
         active_pairs.update(
             self._cold_activated_pairs(final_decision)
         )
+        active_pairs.update(cold_start_pairs)
         active_memory_mb = sum(
             self.function_map[function_id].memory_mb
             for function_id, _ in active_pairs
@@ -791,11 +903,11 @@ class FastSlotExecutor:
             selected_execution_node_ids=(
                 final_decision.selected_execution_node_ids
             ),
-            initial_audit=optimization.initial_audit,
+            initial_audit=initial_audit,
             final_audit=final_audit,
-            fast_repair_attempted=optimization.attempted,
-            fast_repair_succeeded=optimization.succeeded,
-            fast_repair_reason=optimization.reason,
+            fast_repair_attempted=repair_attempted,
+            fast_repair_succeeded=repair_succeeded,
+            fast_repair_reason=repair_reason,
             request_success=final_decision.request_success,
             deadline_met=deadline_met,
             end_to_end_delay_ms=end_to_end_delay_ms,
@@ -814,10 +926,18 @@ class FastSlotExecutor:
                 final_decision.backup_activation_triggered
             ),
             failover_function_ids=(
-                final_decision.failover_function_ids
+                tuple(
+                    function_id
+                    for function_id in self.sfc.function_ids
+                    if function_id in all_failover_function_ids
+                )
             ),
             cold_start_function_ids=(
-                final_decision.cold_start_function_ids
+                tuple(
+                    function_id
+                    for function_id in self.sfc.function_ids
+                    if any(pair[0] == function_id for pair in cold_start_pairs)
+                )
             ),
             unavailable_function_ids=(
                 final_decision.unavailable_function_ids
@@ -827,8 +947,24 @@ class FastSlotExecutor:
             failover_delay_ms=failover_delay_ms,
             active_instance_count=len(active_pairs),
             fast_repair_evaluated_candidate_count=(
-                optimization.evaluated_candidate_count
+                evaluated_candidate_count
             ),
+            fast_solver_status=(
+                "not_used" if convex_result is None else convex_result.solver_status
+            ),
+            fast_solver_objective_value=(
+                None if convex_result is None else convex_result.objective_value
+            ),
+            fast_solver_time_seconds=(
+                0.0 if convex_result is None else convex_result.solve_time_seconds
+            ),
+            scheduled_request_counts=tuple(
+                batch.request_count for batch in scheduled_batches
+            ),
+            scheduled_execution_node_ids=tuple(
+                batch.execution_node_ids for batch in scheduled_batches
+            ),
+            cold_start_function_node_pairs=tuple(sorted(cold_start_pairs)),
         )
 
 

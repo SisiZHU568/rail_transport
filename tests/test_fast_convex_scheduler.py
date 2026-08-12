@@ -1,6 +1,7 @@
 """测试 DPPO 固定部署下的 CLARABEL 快层请求调度。"""
 
 import cvxpy as cp
+import pytest
 
 from src.entities import (
     EdgeNode,
@@ -9,7 +10,7 @@ from src.entities import (
     ServicePriority,
     SFCType,
 )
-from src.fast_convex_scheduler import FastConvexScheduler
+from src.fast_convex_scheduler import FastConvexScheduler, FastScheduledBatch
 from src.network import LinearMECNetwork
 from src.topology import LinearRailTopology, TracksideSite
 from src.two_timescale_control import FastTimescaleState
@@ -113,6 +114,13 @@ def test_no_requests_skip_clarabel(monkeypatch) -> None:
     assert result.succeeded is True
     assert result.solver_status == "not_run"
     assert result.scheduled_batches == ()
+
+
+def test_scheduled_batch_requires_integer_request_count() -> None:
+    """连续比例完成取整后，小数请求数绝不能流入真实执行器。"""
+
+    with pytest.raises(ValueError, match="正整数"):
+        FastScheduledBatch(1.5, (0, 1))
 
 
 def test_low_load_uses_the_lowest_cost_complete_path() -> None:

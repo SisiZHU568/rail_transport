@@ -80,6 +80,8 @@ def test_reset_and_step_expose_projected_and_final_results(
     assert info["raw_action"][0] == pytest.approx(2.0)
     assert info["clipped_action"][0] == pytest.approx(1.0)
     assert info["projection_result"].success is True
+    assert info["fast_solver_status"] in {"optimal", "not_run"}
+    assert info["fast_solver_time_seconds"] >= 0.0
 
 
 def test_step_calls_fast_executor_once_per_fast_slot(dppo_environment) -> None:

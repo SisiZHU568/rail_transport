@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 
+from src.fast_convex_scheduler import FastConvexSchedulingResult
 from src.sfc_deployment_intent import (
     FunctionDeploymentIntent,
     SFCDeploymentIntent,
@@ -60,6 +61,50 @@ def test_executor_uses_per_function_replica_counts() -> None:
     assert result.final_audit is not None
     assert result.final_audit.all_constraints_met is True
     assert result.retained_hot_node_ids_by_function[0] == frozenset({0, 1})
+    assert result.fast_solver_status == "optimal"
+    assert sum(result.scheduled_request_counts) == 1
+
+
+def test_explicit_intent_solver_failure_never_calls_legacy_optimizer() -> None:
+    """DPPO 数学求解失败时直接拒绝，不能偷偷调用旧枚举器。"""
+
+    executor = build_executor(
+        unrepairable=False,
+        function_ids=(0, 1, 2),
+        node_count=5,
+    )
+
+    def forbidden_optimize(*args: object, **kwargs: object) -> None:
+        raise AssertionError("DPPO 分支禁止调用旧枚举优化器")
+
+    executor.fast_optimizer.optimize = forbidden_optimize
+
+    class FailedScheduler:
+        def schedule(self, **kwargs: object) -> FastConvexSchedulingResult:
+            return FastConvexSchedulingResult(
+                succeeded=False,
+                solver_status="infeasible",
+                objective_value=None,
+                solve_time_seconds=0.01,
+                path_node_ids=(),
+                path_fractions=(),
+                scheduled_batches=(),
+                reason="测试不可行",
+            )
+
+    executor.fast_convex_scheduler = FailedScheduler()
+    result = executor.execute(
+        replace(
+            build_slot_input(node_count=5),
+            slow_decision=None,
+            deployment_intent=_mixed_intent(),
+        )
+    )
+
+    assert result.constraint_rejected is True
+    assert result.request_success is False
+    assert result.fast_solver_status == "infeasible"
+    assert result.fast_repair_reason == "测试不可行"
 
 
 def test_continuous_retention_expires_without_reapplying_same_intent() -> None:

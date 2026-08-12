@@ -235,6 +235,33 @@ class DPPOSlowTimescaleEnvironment:
             "exact_sfc_reliability_samples": (
                 execution.exact_sfc_reliability_samples
             ),
+            # 当前阶段先透传窗口最后一个快时隙的求解明细；完整论文统计
+            # 后续可直接从同结构扩展为逐时隙序列，不影响奖励函数。
+            "fast_solver_status": (
+                "not_run"
+                if execution.last_fast_result is None
+                else execution.last_fast_result.fast_solver_status
+            ),
+            "fast_solver_objective_value": (
+                None
+                if execution.last_fast_result is None
+                else execution.last_fast_result.fast_solver_objective_value
+            ),
+            "fast_solver_time_seconds": (
+                0.0
+                if execution.last_fast_result is None
+                else execution.last_fast_result.fast_solver_time_seconds
+            ),
+            "fast_scheduled_request_counts": (
+                ()
+                if execution.last_fast_result is None
+                else execution.last_fast_result.scheduled_request_counts
+            ),
+            "fast_scheduled_execution_node_ids": (
+                ()
+                if execution.last_fast_result is None
+                else execution.last_fast_result.scheduled_execution_node_ids
+            ),
             "reward_breakdown": execution.reward_breakdown,
             "next_observation": next_state.copy(),
             "window_start_slot": execution.window_start_slot,

@@ -15,6 +15,7 @@ from src.entities import (
 )
 from src.failure_process import InfrastructureState
 from src.fast_optimizer import FastFeasibilityOptimizer
+from src.fast_convex_scheduler import FastConvexScheduler
 from src.fast_slot_executor import (
     FastSlotExecutor,
     FastSlotInput,
@@ -134,6 +135,22 @@ def build_executor(
         input_size_mb_per_request=2.0,
         slot_seconds=1.0,
     )
+    fast_convex_scheduler = FastConvexScheduler(
+        topology=topology,
+        network=network,
+        functions=functions,
+        sfc=sfc,
+        input_size_mb_per_request=2.0,
+        slot_seconds=1.0,
+        edge_cpu_cost_per_unit=cost_rates.edge_cpu_cost_per_unit,
+        edge_memory_cost_per_mb_second=cost_rates.edge_memory_cost_per_mb_second,
+        cloud_cpu_cost_per_unit=cost_rates.cloud_cpu_cost_per_unit,
+        cloud_memory_cost_per_mb_second=cost_rates.cloud_memory_cost_per_mb_second,
+        cold_start_cost_per_ms=cost_rates.cold_start_cost_per_ms,
+        solver_name="CLARABEL",
+        max_iterations=200,
+        feasibility_tolerance=1.0e-7,
+    )
 
     return FastSlotExecutor(
         topology=topology,
@@ -153,6 +170,7 @@ def build_executor(
         },
         constraint_auditor=auditor,
         fast_optimizer=optimizer,
+        fast_convex_scheduler=fast_convex_scheduler,
         input_size_mb_per_request=2.0,
         slot_seconds=1.0,
         handover_hot_window_s=2.0,

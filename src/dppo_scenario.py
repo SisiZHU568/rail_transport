@@ -10,6 +10,7 @@ from src.dppo_slow_timescale_env import DPPOSlowTimescaleEnvironment
 from src.dppo_state_encoder import DPPOStateEncoder
 from src.entities import ServerlessFunction, ServicePriority, SFCType
 from src.failure_risk_prediction import build_windowed_failure_risk_provider
+from src.fast_convex_scheduler import FastConvexScheduler
 from src.fast_optimizer import FastFeasibilityOptimizer
 from src.fast_slot_executor import FastSlotExecutor, RuntimeCostRates
 from src.mobility import TrainMobilityModel
@@ -185,6 +186,32 @@ def build_dppo_scenario(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironment:
         input_size_mb_per_request=input_size_mb_per_request,
         slot_seconds=slot_seconds,
     )
+    fast_scheduler_config = config["dppo"]["fast_scheduler"]
+    # 快层调度器只消费慢层已部署副本；它固定在 CPU 上使用 CLARABEL，
+    # 不会改变 DPPO 神经网络的 training.device 配置。
+    fast_convex_scheduler = FastConvexScheduler(
+        topology=topology,
+        network=network,
+        functions=functions,
+        sfc=sfc,
+        input_size_mb_per_request=input_size_mb_per_request,
+        slot_seconds=slot_seconds,
+        edge_cpu_cost_per_unit=cost_rates.edge_cpu_cost_per_unit,
+        edge_memory_cost_per_mb_second=(
+            cost_rates.edge_memory_cost_per_mb_second
+        ),
+        cloud_cpu_cost_per_unit=cost_rates.cloud_cpu_cost_per_unit,
+        cloud_memory_cost_per_mb_second=(
+            cost_rates.cloud_memory_cost_per_mb_second
+        ),
+        cold_start_cost_per_ms=cost_rates.cold_start_cost_per_ms,
+        solver_name=fast_scheduler_config["solver"],
+        max_iterations=fast_scheduler_config["max_iterations"],
+        feasibility_tolerance=(
+            fast_scheduler_config["feasibility_tolerance"]
+        ),
+        return_result_to_source=True,
+    )
     executor = FastSlotExecutor(
         topology=topology,
         network=network,
@@ -197,6 +224,7 @@ def build_dppo_scenario(config: dict[str, Any]) -> DPPOSlowTimescaleEnvironment:
         },
         constraint_auditor=auditor,
         fast_optimizer=optimizer,
+        fast_convex_scheduler=fast_convex_scheduler,
         input_size_mb_per_request=input_size_mb_per_request,
         slot_seconds=slot_seconds,
         handover_hot_window_s=float(
