@@ -559,6 +559,12 @@ dppo:
     minimum_replicas: 2
     maximum_replicas: 3
 
+  fast_scheduler:
+    # 快层数学规划固定由 CPU 上的 CLARABEL 求解；它不占用 DPPO 的 GPU。
+    solver: CLARABEL
+    max_iterations: 200
+    feasibility_tolerance: 1.0e-7
+
   diffusion:
     steps: 20
     fine_tuned_steps: 5

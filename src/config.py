@@ -95,6 +95,25 @@ def validate_config(config: dict[str, Any]) -> None:
     if maximum_replicas > compute_node_count:
         raise ValueError("maximum_replicas 不能大于 compute_node_count。")
 
+    fast_scheduler = _require_mapping(dppo, "fast_scheduler")
+    if fast_scheduler.get("solver") != "CLARABEL":
+        raise ValueError("dppo.fast_scheduler.solver 当前必须为 CLARABEL。")
+    _require_positive_integer(
+        fast_scheduler,
+        "max_iterations",
+        display_key="dppo.fast_scheduler.max_iterations",
+    )
+    feasibility_tolerance = fast_scheduler.get("feasibility_tolerance")
+    if (
+        isinstance(feasibility_tolerance, bool)
+        or not isinstance(feasibility_tolerance, (int, float))
+        or not math.isfinite(float(feasibility_tolerance))
+        or float(feasibility_tolerance) <= 0.0
+    ):
+        raise ValueError(
+            "dppo.fast_scheduler.feasibility_tolerance 必须是正有限数。"
+        )
+
     diffusion = _require_mapping(dppo, "diffusion")
     diffusion_steps = _require_positive_integer(diffusion, "steps")
     fine_tuned_steps = _require_positive_integer(diffusion, "fine_tuned_steps")

@@ -23,6 +23,11 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["action"]["schema_version"] == "joint-sfc-continuous-v2"
     assert config["dppo"]["action"]["minimum_replicas"] == 2
     assert config["dppo"]["action"]["maximum_replicas"] == 3
+    assert config["dppo"]["fast_scheduler"] == {
+        "solver": "CLARABEL",
+        "max_iterations": 200,
+        "feasibility_tolerance": 1.0e-7,
+    }
     assert config["dppo"]["diffusion"]["steps"] == 20
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
     assert config["dppo"]["training"]["iterations"] > 0
@@ -48,6 +53,27 @@ def test_load_debug_config() -> None:
     }
     assert config["dppo"]["training"]["seed"] == 13000
     assert 20000 <= stability["calibration_seed_start"] < 30000
+
+
+@pytest.mark.parametrize(
+    ("key", "invalid_value"),
+    (
+        ("solver", "HIGHS"),
+        ("max_iterations", 0),
+        ("feasibility_tolerance", 0.0),
+    ),
+)
+def test_validate_config_rejects_invalid_fast_scheduler_setting(
+    key: str,
+    invalid_value: object,
+) -> None:
+    """快层只允许使用一组明确且有物理意义的 CLARABEL 配置。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["fast_scheduler"][key] = invalid_value
+
+    with pytest.raises(ValueError, match=rf"dppo\.fast_scheduler\.{key}"):
+        validate_config(config)
 
 
 def test_validate_config_rejects_dataset_fractions_not_summing_to_one() -> None:
