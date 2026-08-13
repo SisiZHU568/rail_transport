@@ -122,6 +122,15 @@ class QueueCommitResult:
     snapshot: QueueSnapshot
 
 
+@dataclass(frozen=True)
+class SLAReport:
+    """当前边界新增违约及累计完成状态。"""
+
+    new_violation_count: int
+    on_time_completed_count: int
+    late_completed_count: int
+
+
 class QueueStateManager:
     """唯一持有队列运行状态；所有资源服务通过原子计划提交。"""
 
@@ -255,6 +264,40 @@ class QueueStateManager:
 
     def _reject(self, code: str) -> QueueCommitResult:
         return QueueCommitResult(False, code, self.snapshot())
+
+    def audit_deadlines(self) -> SLAReport:
+        """严格超过截止时间才记一次违约，已违约批次仍可继续完成。"""
+
+        current_time = self._current_slot * self.slot_seconds
+        new_violations = 0
+        on_time_completed = 0
+        late_completed = 0
+        updated: list[BatchRecord] = []
+        for batch in self._batches:
+            violated = batch.violation_recorded
+            if (
+                batch.completion_slot is None
+                and current_time > batch.absolute_deadline_time
+                and not violated
+            ):
+                violated = True
+                new_violations += 1
+            if batch.completion_slot is not None:
+                completion_time = batch.completion_slot * self.slot_seconds
+                if completion_time <= batch.absolute_deadline_time:
+                    on_time_completed += 1
+                else:
+                    late_completed += 1
+                    violated = True
+            updated.append(replace(batch, violation_recorded=violated))
+        if updated != self._batches:
+            self._batches = updated
+            self._version += 1
+        return SLAReport(
+            new_violations,
+            on_time_completed,
+            late_completed,
+        )
 
     def _is_stale(
         self,
