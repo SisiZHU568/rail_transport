@@ -161,8 +161,13 @@ def validate_config(config: dict[str, Any]) -> None:
     pretraining = _require_mapping(dppo, "pretraining")
     _require_positive_integer(
         pretraining,
-        "epochs",
-        display_key="dppo.pretraining.epochs",
+        "optimizer_steps",
+        display_key="dppo.pretraining.optimizer_steps",
+    )
+    _require_positive_integer(
+        pretraining,
+        "validation_interval_steps",
+        display_key="dppo.pretraining.validation_interval_steps",
     )
     _require_positive_integer(
         pretraining,

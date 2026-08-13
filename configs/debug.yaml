@@ -592,8 +592,10 @@ dppo:
     output_root: results/dppo/datasets
 
   pretraining:
-    # 以下参数用于专家数据上的扩散噪声预测预训练。
-    epochs: 50
+    # 用真实 optimizer.step 次数计量训练量，数据规模变化时实验含义不变。
+    optimizer_steps: 200
+    # 固定间隔检查验证集，并保存验证损失最低的模型。
+    validation_interval_steps: 10
     batch_size: 64
     learning_rate: 0.0003
     gradient_clip_norm: 5.0

@@ -230,6 +230,78 @@ def _select_batch(
     )
 
 
+def pretrain_diffusion_step(
+    model: ConditionalDiffusionMLP,
+    schedule: CosineNoiseSchedule,
+    optimizer: torch.optim.Optimizer,
+    states: torch.Tensor,
+    clean_actions: torch.Tensor,
+    *,
+    optimizer_step: int,
+    batch_size: int,
+    seed: int,
+    device: str | torch.device,
+    gradient_clip_norm: float | None = None,
+) -> float:
+    """按给定步编号执行一次且仅一次扩散噪声预测参数更新。"""
+
+    resolved_device = resolve_torch_device(device)
+    sample_count = _validate_training_tensors(
+        model,
+        states,
+        clean_actions,
+        batch_size,
+        seed,
+    )
+    if (
+        isinstance(optimizer_step, bool)
+        or not isinstance(optimizer_step, int)
+        or optimizer_step < 0
+    ):
+        raise ValueError("optimizer_step 必须是非负整数。")
+    if gradient_clip_norm is not None and (
+        not math.isfinite(float(gradient_clip_norm))
+        or float(gradient_clip_norm) <= 0.0
+    ):
+        raise ValueError("gradient_clip_norm 必须是正有限数或 None。")
+
+    model.to(resolved_device)
+    model.train()
+    batches_per_pass = math.ceil(sample_count / batch_size)
+    pass_index, batch_index = divmod(optimizer_step, batches_per_pass)
+    # 一轮批次用完后，只根据轮次重新洗牌；相同配置和步编号可完全复现。
+    shuffle_generator = torch.Generator(device="cpu").manual_seed(seed + pass_index)
+    permutation = torch.randperm(sample_count, generator=shuffle_generator)
+    start = batch_index * batch_size
+    indices = permutation[start : start + batch_size]
+    batch_states = _select_batch(states, indices, resolved_device)
+    batch_actions = _select_batch(clean_actions, indices, resolved_device)
+    # 每个更新步使用不同扩散噪声，避免小数据集反复看到同一个学习目标。
+    noise_generator = torch.Generator(device=resolved_device).manual_seed(
+        seed + 1_000_000 + optimizer_step
+    )
+
+    optimizer.zero_grad(set_to_none=True)
+    loss = diffusion_noise_loss(
+        model,
+        schedule,
+        batch_states,
+        batch_actions,
+        noise_generator,
+    )
+    if not torch.isfinite(loss):
+        raise FloatingPointError("扩散预训练损失出现非有限值。")
+    loss.backward()
+    if gradient_clip_norm is not None:
+        torch.nn.utils.clip_grad_norm_(
+            model.parameters(),
+            float(gradient_clip_norm),
+            error_if_nonfinite=True,
+        )
+    optimizer.step()
+    return float(loss.detach().cpu())
+
+
 def pretrain_diffusion_epoch(
     model: ConditionalDiffusionMLP,
     schedule: CosineNoiseSchedule,

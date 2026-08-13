@@ -1,6 +1,9 @@
 """使用版本化专家数据预训练 DPPO 条件扩散动作网络。"""
 
 import argparse
+import csv
+from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -12,7 +15,7 @@ from src.dppo_checkpoint import (
     DPPOCheckpointMetadata,
     evaluate_diffusion_loss,
     load_dppo_checkpoint,
-    pretrain_diffusion_epoch,
+    pretrain_diffusion_step,
     resolve_torch_device,
     save_dppo_checkpoint,
     seed_torch_for_pretraining,
@@ -27,6 +30,133 @@ from src.dppo_dataset import (
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
 from src.dppo_scenario import build_dppo_scenario
 from src.dppo_slow_timescale_env import DPPOSlowTimescaleEnvironment
+
+
+@dataclass(frozen=True)
+class PretrainingHistoryRecord:
+    """保存一次定期验证对应的真实更新步和损失。"""
+
+    optimizer_step: int
+    training_loss: float
+    validation_loss: float
+    is_best: bool
+
+
+def write_pretraining_history_csv(
+    path: str | Path,
+    history: Sequence[PretrainingHistoryRecord],
+) -> None:
+    """写出便于人工 review 和论文绘图的预训练损失记录。"""
+
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream, lineterminator="\n")
+        writer.writerow(
+            ("optimizer_step", "training_loss", "validation_loss", "is_best")
+        )
+        for row in history:
+            writer.writerow(
+                (
+                    row.optimizer_step,
+                    row.training_loss,
+                    row.validation_loss,
+                    row.is_best,
+                )
+            )
+
+
+def train_exact_pretraining_steps(
+    model: ConditionalDiffusionMLP,
+    schedule: CosineNoiseSchedule,
+    optimizer: torch.optim.Optimizer,
+    train_states: torch.Tensor,
+    train_actions: torch.Tensor,
+    validation_states: torch.Tensor,
+    validation_actions: torch.Tensor,
+    *,
+    metadata: DPPOCheckpointMetadata,
+    checkpoint_path: str | Path,
+    optimizer_steps: int,
+    validation_interval_steps: int,
+    batch_size: int,
+    seed: int,
+    device: str | torch.device,
+    gradient_clip_norm: float | None,
+) -> tuple[PretrainingHistoryRecord, ...]:
+    """精确训练指定更新次数，并把验证损失最低的模型保存为检查点。"""
+
+    for name, value in (
+        ("optimizer_steps", optimizer_steps),
+        ("validation_interval_steps", validation_interval_steps),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} 必须是正整数。")
+
+    history: list[PretrainingHistoryRecord] = []
+    interval_losses: list[float] = []
+    best_validation_loss = math.inf
+    # 固定验证噪声，使第 10、20……步的损失只反映模型变化。
+    validation_seed = seed + 100000
+    for zero_based_step in range(optimizer_steps):
+        training_loss = pretrain_diffusion_step(
+            model,
+            schedule,
+            optimizer,
+            train_states,
+            train_actions,
+            optimizer_step=zero_based_step,
+            batch_size=batch_size,
+            seed=seed,
+            device=device,
+            gradient_clip_norm=gradient_clip_norm,
+        )
+        interval_losses.append(training_loss)
+        completed_steps = zero_based_step + 1
+        should_validate = (
+            completed_steps % validation_interval_steps == 0
+            or completed_steps == optimizer_steps
+        )
+        if not should_validate:
+            continue
+
+        validation_loss = evaluate_diffusion_loss(
+            model,
+            schedule,
+            validation_states,
+            validation_actions,
+            batch_size=batch_size,
+            seed=validation_seed,
+            device=device,
+        )
+        mean_training_loss = sum(interval_losses) / len(interval_losses)
+        interval_losses.clear()
+        is_best = validation_loss < best_validation_loss
+        if is_best:
+            best_validation_loss = validation_loss
+            # 检查点 v1 的 epoch 字段暂存零基更新步，避免破坏既有加载接口。
+            save_dppo_checkpoint(
+                checkpoint_path,
+                model,
+                optimizer,
+                metadata,
+                epoch=completed_steps - 1,
+            )
+        history.append(
+            PretrainingHistoryRecord(
+                optimizer_step=completed_steps,
+                training_loss=mean_training_loss,
+                validation_loss=validation_loss,
+                is_best=is_best,
+            )
+        )
+        print(
+            f"optimizer_step={completed_steps}/{optimizer_steps} "
+            f"train_loss={mean_training_loss:.6f} "
+            f"validation_loss={validation_loss:.6f} "
+            f"is_best={is_best}"
+        )
+    return tuple(history)
 
 
 def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
@@ -51,10 +181,10 @@ def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespac
         help="预训练检查点输出目录。",
     )
     parser.add_argument(
-        "--epochs",
+        "--optimizer-steps",
         type=int,
         default=None,
-        help="覆盖配置中的预训练轮数。",
+        help="覆盖配置中的预训练优化器更新次数。",
     )
     parser.add_argument(
         "--device",
@@ -116,13 +246,13 @@ def main(arguments: Sequence[str] | None = None) -> None:
     parsed = parse_arguments(arguments)
     config = load_config(parsed.config)
     pretraining_config = config["dppo"]["pretraining"]
-    epochs = (
-        int(pretraining_config["epochs"])
-        if parsed.epochs is None
-        else parsed.epochs
+    optimizer_steps = (
+        int(pretraining_config["optimizer_steps"])
+        if parsed.optimizer_steps is None
+        else parsed.optimizer_steps
     )
-    if epochs <= 0:
-        raise ValueError("epochs 必须是正整数。")
+    if optimizer_steps <= 0:
+        raise ValueError("optimizer_steps 必须是正整数。")
     device_name = (
         str(config["dppo"]["training"]["device"])
         if parsed.device is None
@@ -165,41 +295,28 @@ def main(arguments: Sequence[str] | None = None) -> None:
         lr=float(pretraining_config["learning_rate"]),
     )
     batch_size = int(pretraining_config["batch_size"])
-    for epoch in range(epochs):
-        train_loss = pretrain_diffusion_epoch(
-            model,
-            schedule,
-            optimizer,
-            train_states,
-            train_actions,
-            batch_size=batch_size,
-            seed=base_seed + epoch,
-            device=device,
-            gradient_clip_norm=float(pretraining_config["gradient_clip_norm"]),
-        )
-        validation_loss = evaluate_diffusion_loss(
-            model,
-            schedule,
-            validation_states,
-            validation_actions,
-            batch_size=batch_size,
-            seed=base_seed + 100000 + epoch,
-            device=device,
-        )
-        print(
-            f"epoch={epoch + 1}/{epochs} "
-            f"train_loss={train_loss:.6f} "
-            f"validation_loss={validation_loss:.6f}"
-        )
-
     checkpoint_path = Path(parsed.output_root) / "dppo_pretrained.pt"
-    save_dppo_checkpoint(
-        checkpoint_path,
+    history = train_exact_pretraining_steps(
         model,
+        schedule,
         optimizer,
-        checkpoint_metadata,
-        epoch=epochs - 1,
+        train_states,
+        train_actions,
+        validation_states,
+        validation_actions,
+        metadata=checkpoint_metadata,
+        checkpoint_path=checkpoint_path,
+        optimizer_steps=optimizer_steps,
+        validation_interval_steps=int(
+            pretraining_config["validation_interval_steps"]
+        ),
+        batch_size=batch_size,
+        seed=base_seed,
+        device=device,
+        gradient_clip_norm=float(pretraining_config["gradient_clip_norm"]),
     )
+    history_path = Path(parsed.output_root) / "pretraining_history.csv"
+    write_pretraining_history_csv(history_path, history)
     # 写盘后立即重新加载，确保交付的文件本身可恢复且配置完全一致。
     restored = load_dppo_checkpoint(
         checkpoint_path,
@@ -207,7 +324,12 @@ def main(arguments: Sequence[str] | None = None) -> None:
         device=device,
     )
     print(f"检查点：{checkpoint_path.resolve()}")
-    print(f"恢复 epoch：{restored.epoch}")
+    best_record = min(history, key=lambda row: row.validation_loss)
+    print(f"实际完成 optimizer steps：{optimizer_steps}")
+    print(f"最佳 optimizer step：{best_record.optimizer_step}")
+    print(f"最佳 validation loss：{best_record.validation_loss:.6f}")
+    print(f"恢复 optimizer step：{restored.epoch + 1}")
+    print(f"训练记录：{history_path.resolve()}")
     print(f"配置哈希：{restored.metadata.config_hash}")
 
 

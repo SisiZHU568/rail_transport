@@ -12,6 +12,7 @@ from src.dppo_checkpoint import (
     load_dppo_checkpoint,
     load_dppo_online_checkpoint,
     pretrain_diffusion_epoch,
+    pretrain_diffusion_step,
     resolve_torch_device,
     save_dppo_checkpoint,
     save_dppo_online_checkpoint,
@@ -58,6 +59,85 @@ def _synthetic_expert_batch() -> tuple[torch.Tensor, torch.Tensor]:
     states = torch.randn((8, 58), generator=generator)
     actions = torch.tanh(torch.randn((8, 14), generator=generator))
     return states, actions
+
+
+class _CountingAdam(torch.optim.Adam):
+    """仅用于确认一次公共调用只执行一次真实参数更新。"""
+
+    def __init__(self, parameters, **kwargs) -> None:
+        super().__init__(parameters, **kwargs)
+        self.step_calls = 0
+
+    def step(self, closure=None):
+        self.step_calls += 1
+        return super().step(closure)
+
+
+def test_pretraining_step_executes_exactly_one_optimizer_update() -> None:
+    """五次单步调用必须对应五次 optimizer.step，而不受数据量影响。"""
+
+    torch.manual_seed(97)
+    states, actions = _synthetic_expert_batch()
+    model = ConditionalDiffusionMLP(58, 14, (16, 16))
+    schedule = CosineNoiseSchedule(steps=20)
+    optimizer = _CountingAdam(model.parameters(), lr=1e-3)
+
+    losses = [
+        pretrain_diffusion_step(
+            model,
+            schedule,
+            optimizer,
+            states,
+            actions,
+            optimizer_step=step,
+            batch_size=3,
+            seed=12000,
+            device="cpu",
+        )
+        for step in range(5)
+    ]
+
+    assert optimizer.step_calls == 5
+    assert all(torch.isfinite(torch.tensor(loss)) for loss in losses)
+
+
+def test_pretraining_step_is_reproducible_across_reshuffled_passes() -> None:
+    """完成一轮小批次遍历后，下一轮重新洗牌仍需完全可复现。"""
+
+    states, actions = _synthetic_expert_batch()
+
+    def train_once() -> tuple[dict[str, torch.Tensor], list[float]]:
+        torch.manual_seed(99)
+        model = ConditionalDiffusionMLP(58, 14, (16, 16))
+        optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+        schedule = CosineNoiseSchedule(steps=20)
+        losses = [
+            pretrain_diffusion_step(
+                model,
+                schedule,
+                optimizer,
+                states,
+                actions,
+                optimizer_step=step,
+                batch_size=3,
+                seed=12000,
+                device="cpu",
+            )
+            for step in range(4)
+        ]
+        return (
+            {name: parameter.detach().clone() for name, parameter in model.named_parameters()},
+            losses,
+        )
+
+    first_parameters, first_losses = train_once()
+    second_parameters, second_losses = train_once()
+
+    assert first_losses == second_losses
+    assert all(
+        torch.equal(first_parameters[name], second_parameters[name])
+        for name in first_parameters
+    )
 
 
 def _online_agent() -> DPPOAgent:
@@ -298,16 +378,93 @@ def test_pretraining_cli_requires_dataset_and_output_roots() -> None:
             "temporary-dataset",
             "--output-root",
             "temporary-checkpoint",
-            "--epochs",
-            "1",
+            "--optimizer-steps",
+            "7",
             "--device",
             "cpu",
         ]
     )
     assert arguments.dataset_root == "temporary-dataset"
     assert arguments.output_root == "temporary-checkpoint"
-    assert arguments.epochs == 1
+    assert arguments.optimizer_steps == 7
     assert arguments.device == "cpu"
+
+
+def test_exact_pretraining_keeps_best_validation_checkpoint(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """定期验证必须使用固定噪声，并保留最低验证损失所在更新步。"""
+
+    import run_dppo_pretraining as pretraining_command
+
+    torch.manual_seed(149)
+    states, actions = _synthetic_expert_batch()
+    model = ConditionalDiffusionMLP(58, 14, (16, 16))
+    schedule = CosineNoiseSchedule(steps=20)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    validation_seeds: list[int] = []
+    validation_losses = iter((0.25, 0.50))
+
+    def controlled_validation(*args, seed: int, **kwargs) -> float:
+        validation_seeds.append(seed)
+        return next(validation_losses)
+
+    monkeypatch.setattr(
+        pretraining_command,
+        "evaluate_diffusion_loss",
+        controlled_validation,
+    )
+    checkpoint_path = tmp_path / "dppo_pretrained.pt"
+    history = pretraining_command.train_exact_pretraining_steps(
+        model,
+        schedule,
+        optimizer,
+        states,
+        actions,
+        states[:4],
+        actions[:4],
+        metadata=_metadata(),
+        checkpoint_path=checkpoint_path,
+        optimizer_steps=4,
+        validation_interval_steps=2,
+        batch_size=4,
+        seed=12000,
+        device="cpu",
+        gradient_clip_norm=5.0,
+    )
+    loaded = load_dppo_checkpoint(
+        checkpoint_path,
+        expected=_metadata(),
+        device="cpu",
+    )
+
+    assert [row.optimizer_step for row in history] == [2, 4]
+    assert [row.is_best for row in history] == [True, False]
+    assert validation_seeds == [112000, 112000]
+    assert loaded.epoch + 1 == 2
+
+
+def test_pretraining_history_csv_has_reviewable_columns(tmp_path) -> None:
+    """训练记录应使用明确的优化步字段，方便实验 review。"""
+
+    from run_dppo_pretraining import (
+        PretrainingHistoryRecord,
+        write_pretraining_history_csv,
+    )
+
+    history_path = tmp_path / "pretraining_history.csv"
+    write_pretraining_history_csv(
+        history_path,
+        (
+            PretrainingHistoryRecord(10, 0.8, 0.7, True),
+            PretrainingHistoryRecord(20, 0.6, 0.75, False),
+        ),
+    )
+
+    lines = history_path.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "optimizer_step,training_loss,validation_loss,is_best"
+    assert lines[1].startswith("10,0.8,0.7,True")
 
 
 def test_online_checkpoint_v2_round_trip_binds_canonical_profile(tmp_path) -> None:

@@ -30,6 +30,8 @@ def test_load_debug_config() -> None:
     }
     assert config["dppo"]["diffusion"]["steps"] == 20
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
+    assert config["dppo"]["pretraining"]["optimizer_steps"] == 200
+    assert config["dppo"]["pretraining"]["validation_interval_steps"] == 10
     assert config["dppo"]["training"]["iterations"] > 0
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
@@ -174,14 +176,27 @@ def test_validate_config_requires_positive_pretraining_batch_size() -> None:
 
     config = deepcopy(load_config("configs/debug.yaml"))
     config["dppo"]["pretraining"] = {
-        "epochs": 1,
+        "optimizer_steps": 1,
+        "validation_interval_steps": 1,
         "batch_size": 0,
         "learning_rate": 0.0003,
+        "gradient_clip_norm": 5.0,
         "seed": 12000,
         "output_root": "results/dppo/pretraining",
     }
 
     with pytest.raises(ValueError, match="pretraining.batch_size"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("key", ("optimizer_steps", "validation_interval_steps"))
+def test_validate_config_requires_positive_pretraining_step_counts(key: str) -> None:
+    """训练量和验证间隔都必须用正的优化器更新次数表达。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["pretraining"][key] = 0
+
+    with pytest.raises(ValueError, match=rf"dppo\.pretraining\.{key}"):
         validate_config(config)
 
 
