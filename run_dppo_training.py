@@ -52,6 +52,10 @@ TRAINING_HISTORY_COLUMNS = (
     "projection_change_ratio",
     "projection_rejection_rate",
     "repair_success_rate",
+    "fast_solver_run_count",
+    "fast_solver_mean_time_seconds",
+    "fast_solver_max_time_seconds",
+    "fast_solver_total_time_seconds",
     "gradient_norm",
     "approximate_kl",
     "maximum_approximate_kl",
@@ -168,6 +172,7 @@ def collect_rollout(
     repair_attempts = 0
     repair_successes = 0
     repair_failures = 0
+    fast_solver_times: list[float] = []
     episode_step = 0
     while True:
         # 使用 Episode seed 和局部步号，避免 Buffer 已有数据改变当前 Episode 轨迹。
@@ -196,6 +201,12 @@ def collect_rollout(
         repair_attempts += int(info["fast_repair_attempts"])
         repair_successes += int(info["fast_repair_successes"])
         repair_failures += int(info["fast_repair_failures"])
+        # 求解器耗时只用于性能观测，不进入奖励或 DPPO 梯度。
+        if str(info["fast_solver_status"]) != "not_run":
+            solver_time = float(info["fast_solver_time_seconds"])
+            if not math.isfinite(solver_time) or solver_time < 0.0:
+                raise FloatingPointError("快层求解耗时必须是非负有限数。")
+            fast_solver_times.append(solver_time)
         state = next_state
         episode_step += 1
         if terminated or truncated:
@@ -223,6 +234,11 @@ def collect_rollout(
         "repair_successes": float(repair_successes),
         "repair_failures": float(repair_failures),
         "repair_success_rate": repair_success_rate,
+        "fast_solver_run_count": float(len(fast_solver_times)),
+        "fast_solver_total_time_seconds": float(sum(fast_solver_times)),
+        "fast_solver_max_time_seconds": (
+            max(fast_solver_times, default=0.0)
+        ),
     }
 
 
@@ -238,6 +254,12 @@ def _aggregate_rollout_metrics(
         raise ValueError("transition_count 必须大于零。")
     repair_attempts = sum(item["repair_attempts"] for item in episode_metrics)
     repair_successes = sum(item["repair_successes"] for item in episode_metrics)
+    fast_solver_run_count = sum(
+        item["fast_solver_run_count"] for item in episode_metrics
+    )
+    fast_solver_total_time = sum(
+        item["fast_solver_total_time_seconds"] for item in episode_metrics
+    )
     return {
         "transition_count": transition_count,
         "mean_reward": (
@@ -258,6 +280,16 @@ def _aggregate_rollout_metrics(
         "repair_success_rate": (
             repair_successes / repair_attempts if repair_attempts > 0.0 else 0.0
         ),
+        "fast_solver_run_count": fast_solver_run_count,
+        "fast_solver_mean_time_seconds": (
+            fast_solver_total_time / fast_solver_run_count
+            if fast_solver_run_count > 0.0
+            else 0.0
+        ),
+        "fast_solver_max_time_seconds": max(
+            item["fast_solver_max_time_seconds"] for item in episode_metrics
+        ),
+        "fast_solver_total_time_seconds": fast_solver_total_time,
     }
 
 
@@ -333,6 +365,16 @@ def train_dppo(
                 "projection_rejection_rate"
             ],
             "repair_success_rate": rollout_metrics["repair_success_rate"],
+            "fast_solver_run_count": rollout_metrics["fast_solver_run_count"],
+            "fast_solver_mean_time_seconds": rollout_metrics[
+                "fast_solver_mean_time_seconds"
+            ],
+            "fast_solver_max_time_seconds": rollout_metrics[
+                "fast_solver_max_time_seconds"
+            ],
+            "fast_solver_total_time_seconds": rollout_metrics[
+                "fast_solver_total_time_seconds"
+            ],
             "gradient_norm": update_metrics["gradient_norm"],
             "approximate_kl": update_metrics["approximate_kl"],
             "maximum_approximate_kl": update_metrics[

@@ -11,7 +11,7 @@ import pytest
 import torch
 
 import run_dppo_training
-from run_dppo_training import collect_rollout, train_dppo
+from run_dppo_training import _aggregate_rollout_metrics, collect_rollout, train_dppo
 from src.config import load_config
 from src.dppo import DPPOAgent, DPPOConfig, DPPORolloutBuffer
 from src.dppo_checkpoint import (
@@ -262,6 +262,36 @@ def test_collect_rollout_keeps_rejected_action_on_policy() -> None:
     assert 0.0 <= losses["clip_fraction"] <= 1.0
 
 
+def test_aggregate_rollout_excludes_not_run_slots_from_solver_mean() -> None:
+    """CLARABEL 平均耗时只能除以真实调用次数，不能被 not_run 的零值稀释。"""
+
+    base = {
+        "transition_count": 1.0,
+        "reward_sum": -0.5,
+        "raw_feasible_count": 1.0,
+        "projection_change_sum": 0.0,
+        "projection_rejection_count": 0.0,
+        "repair_attempts": 1.0,
+        "repair_successes": 1.0,
+        "fast_solver_run_count": 0.0,
+        "fast_solver_total_time_seconds": 0.0,
+        "fast_solver_max_time_seconds": 0.0,
+    }
+    ran_solver = {
+        **base,
+        "fast_solver_run_count": 1.0,
+        "fast_solver_total_time_seconds": 0.02,
+        "fast_solver_max_time_seconds": 0.02,
+    }
+
+    aggregated = _aggregate_rollout_metrics((ran_solver, base))
+
+    assert aggregated["fast_solver_run_count"] == 1.0
+    assert aggregated["fast_solver_total_time_seconds"] == pytest.approx(0.02)
+    assert aggregated["fast_solver_mean_time_seconds"] == pytest.approx(0.02)
+    assert aggregated["fast_solver_max_time_seconds"] == pytest.approx(0.02)
+
+
 def test_online_checkpoint_restores_both_policy_layers_and_value_network(
     tmp_path: Path,
 ) -> None:
@@ -357,6 +387,10 @@ def test_one_iteration_training_writes_only_under_supplied_output_root(
         "projection_change_ratio",
         "projection_rejection_rate",
         "repair_success_rate",
+        "fast_solver_run_count",
+        "fast_solver_mean_time_seconds",
+        "fast_solver_max_time_seconds",
+        "fast_solver_total_time_seconds",
         "gradient_norm",
         "maximum_approximate_kl",
         "optimizer_step_count",
