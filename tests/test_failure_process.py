@@ -273,3 +273,12 @@ def test_effective_events_follow_domain_and_node_combined_state() -> None:
     assert 0 not in second.newly_available_node_ids
     assert 1 in second.newly_available_node_ids
     assert second.is_node_operational(0, topology) is False
+
+
+def test_failure_snapshot_mappings_are_immutable() -> None:
+    """调用方不能修改故障层已经发布的只读快照。"""
+
+    snapshot = ScriptedFailureProcess(build_test_topology()).state_for_slot(0)
+
+    with pytest.raises(TypeError):
+        snapshot.effective_node_up[0] = False  # type: ignore[index]

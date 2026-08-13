@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 import math
+from types import MappingProxyType
 from typing import Any
 
 
@@ -111,12 +112,28 @@ class PhaseAConfig:
     """阶段 A 跨模块共享的不可变配置。"""
 
     fast_slot_seconds: float
+    slow_frame_slots: int
     failure_base_seed: int
     domain_rates: dict[int, CTMCRates]
     node_rates: dict[int, CTMCRates]
     node_resources: dict[int, NodeResourceConfig]
     deployment_pairs: dict[tuple[int, int], DeploymentPairConfig]
     lifecycle: LifecycleConfig
+
+    def __post_init__(self) -> None:
+        """即使调用方直接构造对象，也把全部映射固化为只读副本。"""
+
+        for field_name in (
+            "domain_rates",
+            "node_rates",
+            "node_resources",
+            "deployment_pairs",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(getattr(self, field_name))),
+            )
 
     @property
     def retention_slot_options(self) -> tuple[int, ...]:
@@ -330,6 +347,13 @@ def load_phase_a_config(config: dict[str, Any]) -> PhaseAConfig:
         "simulation.fast_slot_seconds",
         minimum=1e-300,
     )
+    slow_frame_slots = simulation.get("slow_frame_slots")
+    if (
+        isinstance(slow_frame_slots, bool)
+        or not isinstance(slow_frame_slots, int)
+        or slow_frame_slots <= 0
+    ):
+        raise ValueError("simulation.slow_frame_slots 必须是正整数。")
     base_seed = runtime.get("base_seed")
     if isinstance(base_seed, bool) or not isinstance(base_seed, int) or base_seed < 0:
         raise ValueError("runtime_failure.base_seed 必须是非负整数。")
@@ -345,11 +369,12 @@ def load_phase_a_config(config: dict[str, Any]) -> PhaseAConfig:
         raise ValueError("runtime_failure.domain_rates 必须覆盖全部且仅覆盖故障域。")
     result = PhaseAConfig(
         fast_slot_seconds=slot_seconds,
+        slow_frame_slots=slow_frame_slots,
         failure_base_seed=base_seed,
-        domain_rates=domain_rates,
-        node_rates=node_rates,
-        node_resources=resources,
-        deployment_pairs=_deployment_pairs(config, resources),
+        domain_rates=MappingProxyType(domain_rates),
+        node_rates=MappingProxyType(node_rates),
+        node_resources=MappingProxyType(resources),
+        deployment_pairs=MappingProxyType(_deployment_pairs(config, resources)),
         lifecycle=LifecycleConfig(
             schema_version=str(lifecycle.get("schema_version", "")),
             price_version=str(lifecycle.get("price_version", "")),

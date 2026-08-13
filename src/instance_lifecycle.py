@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
 import math
+from types import MappingProxyType
 
 from src.failure_process import FailureSnapshot
 from src.orchestration_config import PhaseAConfig
@@ -45,6 +46,15 @@ class LifecycleSnapshot:
     current_slot: int
     batches: tuple[InstanceBatch, ...]
     memory_used_mb_by_node: dict[int, float]
+
+    def __post_init__(self) -> None:
+        """隔离管理器内部字典，保证快照消费者只能读取。"""
+
+        object.__setattr__(
+            self,
+            "memory_used_mb_by_node",
+            MappingProxyType(dict(self.memory_used_mb_by_node)),
+        )
 
     def _count(
         self,
@@ -111,6 +121,7 @@ class LifecycleCommitResult:
     code: str
     snapshot: LifecycleSnapshot
     created_instance_count: int = 0
+    created_batches: tuple[InstanceBatch, ...] = ()
 
 
 def _derived_batch_id(
@@ -180,7 +191,7 @@ class InstanceLifecycleManager:
             version=self._version,
             current_slot=self._current_slot,
             batches=tuple(sorted(self._batches)),
-            memory_used_mb_by_node=self._memory_usage(),
+            memory_used_mb_by_node=MappingProxyType(self._memory_usage()),
         )
 
     def advance_to_slot(self, current_slot: int) -> LifecycleSnapshot:
@@ -251,6 +262,7 @@ class InstanceLifecycleManager:
             plan.expected_lifecycle_version != self._version
             or plan.expected_failure_version != failure_snapshot.version
             or plan.current_slot != self._current_slot
+            or failure_snapshot.time_slot != plan.current_slot
         ):
             return self._rejected("STALE_SNAPSHOT")
         target_keys = [(target.function_id, target.node_id) for target in plan.targets]
@@ -273,6 +285,7 @@ class InstanceLifecycleManager:
 
         working = list(self._batches)
         created = 0
+        created_batches: list[InstanceBatch] = []
         sequence = 0
         try:
             for target in sorted(plan.targets, key=lambda item: (item.function_id, item.node_id)):
@@ -356,8 +369,7 @@ class InstanceLifecycleManager:
                         pair.cold_start_seconds / self.config.fast_slot_seconds
                     )
                     sequence += 1
-                    refreshed.append(
-                        InstanceBatch(
+                    new_batch = InstanceBatch(
                             batch_id=_derived_batch_id(
                                 f"{target.function_id}:{target.node_id}",
                                 self._version,
@@ -377,7 +389,8 @@ class InstanceLifecycleManager:
                                 ready_slot + target.retention_slots
                             ),
                         )
-                    )
+                    refreshed.append(new_batch)
+                    created_batches.append(new_batch)
                     created += new_count
                 working = [*others, *refreshed]
             self._audit_memory(working)
@@ -391,4 +404,5 @@ class InstanceLifecycleManager:
             "OK",
             self.snapshot(),
             created_instance_count=created,
+            created_batches=tuple(created_batches),
         )

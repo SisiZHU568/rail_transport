@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 import hashlib
 import math
 import random
+from types import MappingProxyType
 from typing import Any
 
 from src.topology import LinearRailTopology
@@ -110,6 +111,16 @@ class FailureSnapshot:
     # 事件集合由“故障域 AND 节点局部状态”的有效状态边沿生成。
     newly_unavailable_node_ids: tuple[int, ...] = ()
     newly_available_node_ids: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        """直接构造的快照也必须隔离调用方原始字典并禁止改写。"""
+
+        for field_name in ("domain_up", "node_local_up", "effective_node_up"):
+            object.__setattr__(
+                self,
+                field_name,
+                MappingProxyType(dict(getattr(self, field_name))),
+            )
 
     def is_node_operational(
         self,
@@ -381,9 +392,9 @@ class ScriptedFailureProcess(FailureProcess):
 
         return FailureSnapshot(
             time_slot=time_slot,
-            domain_up=domain_up,
-            node_local_up=node_local_up,
-            effective_node_up=effective_up,
+            domain_up=MappingProxyType(domain_up),
+            node_local_up=MappingProxyType(node_local_up),
+            effective_node_up=MappingProxyType(effective_up),
             version=time_slot,
             newly_unavailable_node_ids=newly_unavailable,
             newly_available_node_ids=newly_available,
@@ -613,11 +624,9 @@ class MarkovFailureProcess(FailureProcess):
 
         snapshot = FailureSnapshot(
             time_slot=time_slot,
-            domain_up=dict(self._domain_up),
-            node_local_up=dict(
-                self._node_local_up
-            ),
-            effective_node_up=dict(effective_up),
+            domain_up=MappingProxyType(dict(self._domain_up)),
+            node_local_up=MappingProxyType(dict(self._node_local_up)),
+            effective_node_up=MappingProxyType(dict(effective_up)),
             version=time_slot,
             newly_unavailable_node_ids=newly_unavailable,
             newly_available_node_ids=newly_available,

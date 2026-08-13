@@ -26,6 +26,7 @@ def test_phase_a_config_uses_ctmc_rates_and_pair_ranges() -> None:
     model = load_phase_a_config(load_config("configs/debug.yaml"))
 
     assert model.fast_slot_seconds == pytest.approx(1.0)
+    assert model.slow_frame_slots == 10
     assert model.failure_base_seed == 42
     assert set(model.domain_rates) == {0, 1, 2, 3}
     assert set(model.node_rates) == {0, 1, 2, 3, 4, 5}
@@ -75,3 +76,12 @@ def test_phase_a_config_rejects_cold_start_unit_mismatch() -> None:
 
     with pytest.raises(ValueError, match="cold_start_seconds"):
         validate_config(config)
+
+
+def test_phase_a_config_mappings_are_immutable() -> None:
+    """模块获得的只读模型不能被运行代码原地篡改。"""
+
+    model = load_phase_a_config(load_config("configs/debug.yaml"))
+
+    with pytest.raises(TypeError):
+        model.node_rates[0] = model.node_rates[1]  # type: ignore[index]

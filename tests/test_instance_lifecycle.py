@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 
+import pytest
+
 from src.config import load_config
 from src.failure_process import ScriptedFailureProcess
 from src.instance_lifecycle import (
@@ -154,6 +156,25 @@ def test_stale_plan_has_no_partial_effect() -> None:
     assert manager.snapshot() == before
 
 
+def test_failure_snapshot_from_another_slot_is_stale() -> None:
+    """版本号相同也不能把其他时隙的故障快照用于当前部署。"""
+
+    manager, failure = build_manager()
+    before = manager.snapshot()
+    wrong_slot = replace(failure, time_slot=1)
+    plan = LifecycleDeploymentPlan(
+        expected_lifecycle_version=before.version,
+        expected_failure_version=wrong_slot.version,
+        current_slot=0,
+        targets=(DeploymentTarget(0, 0, 1, 5),),
+    )
+
+    result = manager.commit_deployment(plan, wrong_slot)
+
+    assert result.code == "STALE_SNAPSHOT"
+    assert manager.snapshot() == before
+
+
 def test_invalid_count_and_memory_overflow_are_atomic() -> None:
     manager, failure = build_manager()
     before = manager.snapshot()
@@ -270,3 +291,13 @@ def test_preview_deployment_does_not_modify_manager() -> None:
     assert preview.accepted is True
     assert preview.snapshot.active_count(0, 0) == 2
     assert manager.snapshot() == before
+
+
+def test_lifecycle_snapshot_memory_mapping_is_immutable() -> None:
+    """快层和审计器只能读取内存快照，不能改写生命周期状态。"""
+
+    manager, _ = build_manager()
+    snapshot = manager.snapshot()
+
+    with pytest.raises(TypeError):
+        snapshot.memory_used_mb_by_node[0] = 123.0  # type: ignore[index]
