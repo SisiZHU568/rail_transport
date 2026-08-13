@@ -6,6 +6,7 @@ import pytest
 from src.failure_process import FailureSnapshot
 from src.fast_resource_model import (
     FastResourceConfig,
+    NetworkLinkSnapshot,
     NetworkSnapshot,
     NodeFastResource,
     VNFComputeResource,
@@ -29,6 +30,27 @@ def config(*, max_cycles: float = 1e9) -> FastResourceConfig:
         allow_optimal_inaccurate=False,
         nodes={0: NodeFastResource(0, max_cycles, 1, 1e-27, 0.1, 0.0)},
         vnfs={(0, 0): VNFComputeResource(0, 0, 1000.0, max_cycles)},
+    )
+
+
+def two_node_config() -> FastResourceConfig:
+    nodes = {
+        node_id: NodeFastResource(node_id, 1e9, 1, 1e-27, 0.1, 0.0)
+        for node_id in (0, 1)
+    }
+    return FastResourceConfig(
+        slot_seconds=1.0,
+        noise_psd_watt_per_hz=1e-12,
+        energy_price_per_joule=0.01,
+        absolute_lex_tolerance=1e-7,
+        relative_lex_tolerance=1e-7,
+        residual_tolerance=1e-5,
+        active_time_tolerance_seconds=1e-9,
+        solver_name="CLARABEL",
+        max_iterations=200,
+        allow_optimal_inaccurate=False,
+        nodes=nodes,
+        vnfs={(0, 1): VNFComputeResource(0, 1, 1000.0, 1e9)},
     )
 
 
@@ -140,3 +162,67 @@ def test_solver_failure_returns_no_plan_and_no_fallback(monkeypatch) -> None:
     assert result.succeeded is False
     assert result.code == "FAST_SOLVER_FAILURE"
     assert result.plan is None
+
+
+def test_remote_warm_instance_uses_causal_wired_forwarding() -> None:
+    batch = BatchRecord("b", 0, 0.0, 5.0, total_input_equivalent_bits=1e5)
+    fragment = QueueFragment("s", "b", 0, 0, 0, None, 1e5, 0)
+    queue_snapshot = QueueSnapshot(1, 0, (batch,), (), (fragment,), (), ())
+    lifecycle_snapshot = LifecycleSnapshot(
+        2,
+        0,
+        (InstanceBatch("warm", 0, 1, LifecycleStatus.WARM, 1, 0, 10),),
+        {0: 0.0, 1: 1.0},
+    )
+    failure_snapshot = FailureSnapshot(
+        0, {0: True, 1: True}, {0: True, 1: True},
+        {0: True, 1: True}, 3,
+    )
+    network_snapshot = NetworkSnapshot(
+        4,
+        0,
+        0,
+        1e-6,
+        1e6,
+        1.0,
+        (NetworkLinkSnapshot(7, 0, 1, 1e6, 0.2, 1e-9),),
+    )
+
+    result = FastResourceOptimizer(
+        two_node_config(), StageFlowConfig((1.0,))
+    ).solve(queue_snapshot, lifecycle_snapshot, failure_snapshot, network_snapshot)
+
+    assert result.succeeded is True
+    assert result.executed_physical_bits == pytest.approx(0.0, abs=1e-3)
+    assert result.service_shortfall_equivalent_bits == pytest.approx(0.0, abs=1.0)
+    operation = result.plan.operations[0]
+    assert operation.operation_type == "forward"
+    assert operation.routing_target_node == 1
+    assert operation.destination_node_id == 1
+    assert operation.link_id == 7
+    assert operation.propagation_slots == 1
+
+
+def test_wired_capacity_limits_forwarding_with_finite_shortfall() -> None:
+    batch = BatchRecord("b", 0, 0.0, 5.0, total_input_equivalent_bits=2e6)
+    fragment = QueueFragment("s", "b", 0, 0, 0, None, 2e6, 0)
+    queue_snapshot = QueueSnapshot(1, 0, (batch,), (), (fragment,), (), ())
+    lifecycle_snapshot = LifecycleSnapshot(
+        2, 0, (InstanceBatch("w", 0, 1, LifecycleStatus.WARM, 1, 0, 10),),
+        {0: 0.0, 1: 1.0},
+    )
+    failure_snapshot = FailureSnapshot(
+        0, {0: True, 1: True}, {0: True, 1: True}, {0: True, 1: True}, 3
+    )
+    network_snapshot = NetworkSnapshot(
+        4, 0, 0, 1e-6, 1e6, 1.0,
+        (NetworkLinkSnapshot(7, 0, 1, 1e6, 0.2, 0.0),),
+    )
+
+    result = FastResourceOptimizer(two_node_config(), StageFlowConfig((1.0,))).solve(
+        queue_snapshot, lifecycle_snapshot, failure_snapshot, network_snapshot
+    )
+
+    assert result.succeeded is True
+    assert result.plan.operations[0].physical_bits == pytest.approx(1e6, rel=1e-3)
+    assert result.service_shortfall_equivalent_bits == pytest.approx(1e6, rel=1e-3)
