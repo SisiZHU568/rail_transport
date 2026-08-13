@@ -30,7 +30,6 @@ def official_clip_schedule(
     fine_tuned_steps: int,
     maximum_clip_ratio: float,
     base_clip_ratio: float,
-    growth_rate: float,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
@@ -40,11 +39,8 @@ def official_clip_schedule(
         raise ValueError("fine_tuned_steps 必须是正整数。")
     maximum = float(maximum_clip_ratio)
     base = float(base_clip_ratio)
-    rate = float(growth_rate)
     if not (0.0 < base <= maximum < 1.0):
         raise ValueError("裁剪范围必须满足 0 < base <= maximum < 1。")
-    if not math.isfinite(rate) or rate <= 0.0:
-        raise ValueError("growth_rate 必须是正有限数。")
 
     # 只有一个可训练去噪步骤时，它同时也是最接近最终动作的步骤。
     if fine_tuned_steps == 1:
@@ -57,10 +53,8 @@ def official_clip_schedule(
 
     indices = torch.arange(fine_tuned_steps, device=device, dtype=dtype)
     progress = indices / (fine_tuned_steps - 1)
-    # 官方实现采用指数插值：早期去噪更新保守，接近最终动作时逐步放宽。
-    return base + (maximum - base) * (
-        torch.exp(rate * progress) - 1.0
-    ) / math.expm1(rate)
+    # j=0 是最早的可训练反向扩散步，最后一步最接近环境动作。
+    return base * torch.pow(maximum / base, progress)
 
 
 def official_dppo_policy_loss(
@@ -71,7 +65,6 @@ def official_dppo_policy_loss(
     gamma_denoising: float,
     maximum_clip_ratio: float,
     base_clip_ratio: float,
-    growth_rate: float,
 ) -> OfficialDPPOLoss:
     """计算官方 DPPO 的去噪折扣 clipped PPO 策略损失。
 
@@ -95,7 +88,6 @@ def official_dppo_policy_loss(
         fine_tuned_steps=fine_tuned_steps,
         maximum_clip_ratio=maximum_clip_ratio,
         base_clip_ratio=base_clip_ratio,
-        growth_rate=growth_rate,
         device=new_log_probabilities.device,
         dtype=new_log_probabilities.dtype,
     )

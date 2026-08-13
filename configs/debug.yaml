@@ -667,9 +667,8 @@ dppo:
     gamma: 0.99
     gae_lambda: 0.95
     clip_ratio: 0.20
-    # 官方 DPPO：越接近最终动作，PPO 裁剪范围由 0.001 指数增长到候选 clip_ratio。
+    # 越接近最终动作，PPO 裁剪范围按唯一几何公式由 0.001 增长到候选值。
     clip_ratio_base: 0.001
-    clip_ratio_rate: 3.0
     denoising_discount: 0.99
     # 同一真实 rollout 对照表明 0.0001 可在 target_kl=1.0 内完成更新；
     # 0.0003 会在联合动作上产生 KL 过冲，因此 debug 闭环采用更稳健学习率。

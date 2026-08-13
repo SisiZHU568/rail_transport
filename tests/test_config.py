@@ -43,7 +43,6 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["training"]["normalize_advantages"] is True
     assert config["dppo"]["training"]["policy_learning_rate"] == 0.0001
     assert config["dppo"]["training"]["clip_ratio_base"] == 0.001
-    assert config["dppo"]["training"]["clip_ratio_rate"] == 3.0
     stability = config["dppo"]["stability"]
     assert stability == {
         "training_sampling_min_std": 0.01,

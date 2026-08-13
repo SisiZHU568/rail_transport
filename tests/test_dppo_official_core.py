@@ -19,7 +19,6 @@ def test_official_clip_schedule_grows_from_base_to_maximum() -> None:
         fine_tuned_steps=5,
         maximum_clip_ratio=0.20,
         base_clip_ratio=0.001,
-        growth_rate=3.0,
         device=torch.device("cpu"),
         dtype=torch.float32,
     )
@@ -37,7 +36,6 @@ def test_single_fine_tuned_step_uses_maximum_clip_ratio() -> None:
         fine_tuned_steps=1,
         maximum_clip_ratio=0.15,
         base_clip_ratio=0.001,
-        growth_rate=3.0,
         device=torch.device("cpu"),
         dtype=torch.float64,
     )
@@ -63,7 +61,6 @@ def test_official_policy_loss_is_finite_and_backpropagates() -> None:
         gamma_denoising=0.99,
         maximum_clip_ratio=0.20,
         base_clip_ratio=0.001,
-        growth_rate=3.0,
     )
 
     assert torch.isfinite(result.policy_loss)
@@ -101,14 +98,12 @@ def test_official_clip_settings_are_loaded_from_yaml() -> None:
     agent_config = build_dppo_agent_config(config, clip_ratio=0.20)
 
     assert agent_config.clip_ratio_base == pytest.approx(0.001)
-    assert agent_config.clip_ratio_rate == pytest.approx(3.0)
 
 
 @pytest.mark.parametrize(
     "settings",
     (
         {"clip_ratio": 0.10, "clip_ratio_base": 0.20},
-        {"clip_ratio_rate": 0.0},
     ),
 )
 def test_dppo_config_rejects_invalid_official_clip_settings(

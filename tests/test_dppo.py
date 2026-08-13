@@ -133,7 +133,6 @@ def test_update_uses_official_dppo_loss_settings(
         "gamma_denoising": agent.config.denoising_discount,
         "maximum_clip_ratio": agent.config.clip_ratio,
         "base_clip_ratio": agent.config.clip_ratio_base,
-        "growth_rate": agent.config.clip_ratio_rate,
     }
     assert metrics["optimizer_step_count"] >= 1.0
 
@@ -432,11 +431,10 @@ def test_config_appends_ppo_stability_options_with_validated_defaults() -> None:
 
     assert config.target_kl == pytest.approx(1.0)
     assert config.normalize_advantages is True
-    assert tuple(DPPOConfig.__dataclass_fields__)[-4:] == (
+    assert tuple(DPPOConfig.__dataclass_fields__)[-3:] == (
         "target_kl",
         "normalize_advantages",
         "clip_ratio_base",
-        "clip_ratio_rate",
     )
 
 
