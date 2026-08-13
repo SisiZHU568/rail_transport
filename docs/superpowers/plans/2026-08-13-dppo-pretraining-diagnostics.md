@@ -16,7 +16,7 @@
 - Create: `src/dppo_pretraining_diagnostics.py`
 - Create: `tests/test_dppo_pretraining_diagnostics.py`
 
-- [ ] **Step 1: Write failing tests for metric rows**
+- [x] **Step 1: Write failing tests for metric rows**
 
 Create tests that construct a small real `DPPOActionSpace`, decode one expert action and one generated action, and require a public function with this behavior:
 
@@ -44,7 +44,7 @@ assert row.projection_change_ratio == pytest.approx(1 / 6)
 
 Also require rejection of non-finite actions, wrong shapes, unsupported partition/model names, and mismatched function order.
 
-- [ ] **Step 2: Run the focused tests and verify RED**
+- [x] **Step 2: Run the focused tests and verify RED**
 
 Run:
 
@@ -54,7 +54,7 @@ D:\Anaconda3\envs\rail-dppo-gpu\python.exe -m pytest tests/test_dppo_pretraining
 
 Expected: collection fails because `src.dppo_pretraining_diagnostics` does not exist.
 
-- [ ] **Step 3: Implement the immutable metric row and evaluator**
+- [x] **Step 3: Implement the immutable metric row and evaluator**
 
 Add `GeneratedActionMetric` and `evaluate_generated_action`. The evaluator must:
 
@@ -69,7 +69,7 @@ Add `GeneratedActionMetric` and `evaluate_generated_action`. The evaluator must:
 
 Include concise Chinese comments explaining why the expert replica count defines the comparison prefix.
 
-- [ ] **Step 4: Run the focused tests and verify GREEN**
+- [x] **Step 4: Run the focused tests and verify GREEN**
 
 Run the same command. Expected: all Task 1 tests pass.
 
@@ -79,7 +79,7 @@ Run the same command. Expected: all Task 1 tests pass.
 - Modify: `src/dppo_pretraining_diagnostics.py`
 - Modify: `tests/test_dppo_pretraining_diagnostics.py`
 
-- [ ] **Step 1: Write failing aggregation tests**
+- [x] **Step 1: Write failing aggregation tests**
 
 Add paired rows for two records and require:
 
@@ -96,11 +96,11 @@ assert summary["conclusion"] == "continuous_signal_not_learned"
 
 Add a second case meeting both thresholds and improving at least one semantic/feasibility metric; require `continuous_and_deployment_signal_learned`. Require explicit rejection when a record is missing either the random or pretrained row.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run the focused test file. Expected: failures because aggregation does not exist.
 
-- [ ] **Step 3: Implement deterministic aggregation and classification**
+- [x] **Step 3: Implement deterministic aggregation and classification**
 
 Implement `summarize_diagnostic_rows(rows)` returning only JSON-safe finite scalars, strings, lists, and dictionaries. For each model report:
 
@@ -117,7 +117,7 @@ For comparison report relative MSE reduction, per-record MSE improvement rate, a
 - `continuous_only_mapping_problem`;
 - `continuous_and_deployment_signal_learned`.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run the focused test file. Expected: all Task 1–2 tests pass.
 
@@ -127,7 +127,7 @@ Run the focused test file. Expected: all Task 1–2 tests pass.
 - Create: `run_dppo_pretraining_diagnostics.py`
 - Modify: `tests/test_dppo_pretraining_diagnostics.py`
 
-- [ ] **Step 1: Write failing replay and sampling tests**
+- [x] **Step 1: Write failing replay and sampling tests**
 
 Using `configs/debug.yaml` and a two-step cost-teacher record collected by the real dataset collector, require:
 
@@ -140,11 +140,11 @@ assert contexts[0].projection_inputs.operational_node_ids
 
 Change one saved state element and require a `ValueError` containing the episode seed and slow step. Add a small equal-architecture pair of models and require `sample_fair_actions` to use the same seed, return clipped finite actions, reproduce exactly on repeated calls, and produce identical outputs when model parameters are identical.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run the focused test file. Expected: import or attribute failures because the CLI functions do not exist.
 
-- [ ] **Step 3: Implement replay and fair sampling**
+- [x] **Step 3: Implement replay and fair sampling**
 
 Add:
 
@@ -161,7 +161,7 @@ Implement `replay_diagnostic_contexts(config, partitioned_records)` by grouping 
 
 Implement `sample_fair_actions(random_model, pretrained_model, schedule, states, seed, minimum_sampling_standard_deviation, action_space, device)`. Put both models in evaluation mode, call the existing full-chain sampler with the same seed, select the final action, clip through the action space, and restore prior train/eval modes.
 
-- [ ] **Step 4: Verify GREEN**
+- [x] **Step 4: Verify GREEN**
 
 Run the focused test file. Expected: all Task 1–3 tests pass.
 
@@ -171,7 +171,7 @@ Run the focused test file. Expected: all Task 1–3 tests pass.
 - Modify: `run_dppo_pretraining_diagnostics.py`
 - Modify: `tests/test_dppo_pretraining_diagnostics.py`
 
-- [ ] **Step 1: Write failing CLI and output tests**
+- [x] **Step 1: Write failing CLI and output tests**
 
 Require `parse_arguments` to fail unless `--dataset-root`, `--pretrained-checkpoint`, and `--output-root` are explicit. Require a small real run to write:
 
@@ -182,11 +182,11 @@ summary.json
 
 Assert CSV has two rows per held-out record with stable headers; JSON contains schema/config/checkpoint information, model aggregates, comparison, and conclusion; `json.loads` succeeds and recursively contains no NaN/Infinity. Monkeypatch `os.replace` to fail and require any pre-existing output file to remain byte-for-byte unchanged.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run the focused test file. Expected: CLI/output assertions fail.
 
-- [ ] **Step 3: Implement compatibility gates, model construction, evaluation, and atomic output**
+- [x] **Step 3: Implement compatibility gates, model construction, evaluation, and atomic output**
 
 The CLI must:
 
@@ -207,7 +207,7 @@ sample_seed = diagnostic_seed + record.episode_seed * 1000 + record.slow_step
 
 Reject an integer overflow beyond PyTorch generator seed range instead of wrapping silently.
 
-- [ ] **Step 4: Verify the focused suite and core dependencies**
+- [x] **Step 4: Verify the focused suite and core dependencies**
 
 Run:
 
@@ -224,7 +224,7 @@ Expected: all selected tests pass.
 - Create at runtime: `results/dppo/gpu_feasible_medium_v2/pretraining_diagnostics/summary.json`
 - Create: `docs/superpowers/reports/2026-08-13-dppo-pretraining-diagnostics-results.md`
 
-- [ ] **Step 1: Run the diagnostic on GPU**
+- [x] **Step 1: Run the diagnostic on GPU**
 
 Run:
 
@@ -240,7 +240,7 @@ D:\Anaconda3\envs\rail-dppo-gpu\python.exe run_dppo_pretraining_diagnostics.py `
 
 Expected: 46 per-model rows for 23 held-out records, finite JSON metrics, and one of the three approved conclusions.
 
-- [ ] **Step 2: Review the result without starting new training**
+- [x] **Step 2: Review the result without starting new training**
 
 Write a concise Chinese report containing:
 
@@ -252,10 +252,10 @@ Write a concise Chinese report containing:
 - teacher distribution and sample-size limitation;
 - the approved directional conclusion and the next single development decision.
 
-- [ ] **Step 3: Fresh verification**
+- [x] **Step 3: Fresh verification**
 
 Run the Task 4 selected tests again, validate `summary.json` with strict JSON parsing, run `git diff --check`, and confirm only the two new source files, one new test file, plan, and report are tracked.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 Commit source/tests/plan/report to `codex/dppo-main-algorithm`. Runtime CSV, JSON, datasets, and checkpoints remain ignored. Push and verify local and remote commit IDs match.
