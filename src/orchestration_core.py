@@ -18,6 +18,11 @@ from src.queue_manager import (
     SLAReport,
 )
 from src.queue_state import QueueSnapshot
+from src.fast_resource_model import NetworkSnapshot
+from src.fast_resource_optimizer import (
+    FastResourceOptimizationResult,
+    FastResourceOptimizer,
+)
 
 
 @dataclass(frozen=True)
@@ -209,3 +214,46 @@ class PhaseBSlotCoordinator:
             warm_instance_counts=warm_counts,
         )
         return self.queue_manager.commit_allocation(plan, context)
+
+
+@dataclass(frozen=True)
+class FastResourceSlotResult:
+    """一次纯求解及可选原子提交的完整结果。"""
+
+    optimization: FastResourceOptimizationResult
+    commit: QueueCommitResult | None
+
+
+def solve_and_commit_fast_resources(
+    optimizer: FastResourceOptimizer,
+    queue_manager: QueueStateManager,
+    lifecycle_snapshot: LifecycleSnapshot,
+    failure_snapshot: FailureSnapshot,
+    network_snapshot: NetworkSnapshot,
+) -> FastResourceSlotResult:
+    """求解失败时不构造回退计划；成功计划仍由队列层审计版本。"""
+
+    optimization = optimizer.solve(
+        queue_manager.snapshot(),
+        lifecycle_snapshot,
+        failure_snapshot,
+        network_snapshot,
+    )
+    if not optimization.succeeded or optimization.plan is None:
+        return FastResourceSlotResult(optimization, None)
+    context = QueueCommitContext(
+        queue_version=queue_manager.snapshot().version,
+        lifecycle_version=lifecycle_snapshot.version,
+        failure_version=failure_snapshot.version,
+        network_version=network_snapshot.version,
+        current_slot=queue_manager.snapshot().current_slot,
+        effective_node_up=failure_snapshot.effective_node_up,
+        warm_instance_counts=FastResourceOptimizer._warm_counts(
+            lifecycle_snapshot
+        ),
+    )
+    # 空计划表示本时隙没有可用队列，不需要触发队列提交。
+    if not optimization.plan.operations:
+        return FastResourceSlotResult(optimization, None)
+    commit = queue_manager.commit_allocation(optimization.plan, context)
+    return FastResourceSlotResult(optimization, commit)

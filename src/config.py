@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from src.orchestration_config import load_phase_a_config
+from src.fast_resource_model import load_fast_resource_config
 
 
 def _require_mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -179,6 +180,9 @@ def validate_config(config: dict[str, Any]) -> None:
         "validation_interval_steps",
         display_key="dppo.pretraining.validation_interval_steps",
     )
+
+    # 阶段 C 的物理参数同样在训练开始前一次性严格解析。
+    load_fast_resource_config(config)
     _require_positive_integer(
         pretraining,
         "batch_size",

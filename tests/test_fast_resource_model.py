@@ -10,7 +10,9 @@ from src.fast_resource_model import (
     NetworkSnapshot,
     NodeFastResource,
     VNFComputeResource,
+    load_fast_resource_config,
 )
+from src.config import load_config
 
 
 def build_config() -> FastResourceConfig:
@@ -73,3 +75,12 @@ def test_network_snapshot_is_versioned_and_read_only() -> None:
 def test_resource_parameters_reject_nonphysical_values(mutation: object) -> None:
     with pytest.raises(ValueError):
         mutation()  # type: ignore[operator]
+
+
+def test_debug_fast_resource_config_is_derived_from_scenario_size() -> None:
+    model = load_fast_resource_config(load_config("configs/debug.yaml"))
+
+    assert set(model.nodes) == {0, 1, 2, 3, 4, 5}
+    assert len(model.vnfs) == 18
+    assert model.vnfs[(2, 5)].cpu_cycles_per_physical_bit == 2000.0
+    assert model.nodes[5].core_count == 32

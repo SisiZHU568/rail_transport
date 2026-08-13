@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import math
 from types import MappingProxyType
-from typing import Mapping
+from typing import Any, Mapping
 
 
 def _positive(value: float, field_name: str) -> None:
@@ -132,3 +132,71 @@ class FastResourceConfig:
             raise ValueError("VNF 资源引用了未知节点。")
         object.__setattr__(self, "nodes", MappingProxyType(nodes))
         object.__setattr__(self, "vnfs", MappingProxyType(vnfs))
+
+
+def load_fast_resource_config(config: dict[str, Any]) -> FastResourceConfig:
+    """从场景规模和阶段 A 部署组合生成快层资源配置。"""
+
+    section = config["fast_resource_optimization"]
+    resources = config["node_resources"]
+    topology = config["topology"]
+    mec_count = int(topology["mec_count"])
+    include_cloud = topology.get("include_cloud") is True
+    nodes: dict[int, NodeFastResource] = {}
+    for node_id in range(mec_count + int(include_cloud)):
+        is_cloud = node_id == mec_count
+        nodes[node_id] = NodeFastResource(
+            node_id=node_id,
+            maximum_cpu_cycles_per_second=float(
+                resources[
+                    "cloud_cpu_capacity_cycles_per_second"
+                    if is_cloud else "mec_cpu_capacity_cycles_per_second"
+                ]
+            ),
+            core_count=int(
+                resources["cloud_core_count" if is_cloud else "mec_core_count"]
+            ),
+            dvfs_kappa=float(
+                section["cloud_dvfs_kappa" if is_cloud else "mec_dvfs_kappa"]
+            ),
+            cpu_price_per_second=float(
+                section[
+                    "cloud_cpu_price_per_second"
+                    if is_cloud else "mec_cpu_price_per_second"
+                ]
+            ),
+            cloud_price_per_gcycle=(
+                float(section["cloud_price_per_gcycle"]) if is_cloud else 0.0
+            ),
+        )
+    functions = {
+        int(item["function_id"]): item
+        for item in config["rl_scenario"]["functions"]
+    }
+    pairs: dict[tuple[int, int], VNFComputeResource] = {}
+    for deployment in config["instance_lifecycle"]["allowed_deployments"]:
+        function_id = int(deployment["function_id"])
+        for node_id in deployment["node_ids"]:
+            key = (function_id, int(node_id))
+            pairs[key] = VNFComputeResource(
+                function_id,
+                int(node_id),
+                float(functions[function_id]["cpu_cycles_per_input_bit"]),
+                float(deployment["single_instance_max_cpu_cycles_per_second"]),
+            )
+    return FastResourceConfig(
+        slot_seconds=float(config["simulation"]["fast_slot_seconds"]),
+        noise_psd_watt_per_hz=float(section["noise_psd_watt_per_hz"]),
+        energy_price_per_joule=float(section["energy_price_per_joule"]),
+        absolute_lex_tolerance=float(section["absolute_lex_tolerance"]),
+        relative_lex_tolerance=float(section["relative_lex_tolerance"]),
+        residual_tolerance=float(section["residual_tolerance"]),
+        active_time_tolerance_seconds=float(
+            section["active_time_tolerance_seconds"]
+        ),
+        solver_name=str(section["solver"]),
+        max_iterations=int(section["max_iterations"]),
+        allow_optimal_inaccurate=bool(section["allow_optimal_inaccurate"]),
+        nodes=nodes,
+        vnfs=pairs,
+    )

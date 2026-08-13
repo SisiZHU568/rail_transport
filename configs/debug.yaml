@@ -55,6 +55,27 @@ node_resources:
   cloud_fault_domain_id: 3
 
 # ============================================================
+# 阶段 C：快时隙连续资源分配参数
+# ============================================================
+fast_resource_optimization:
+  solver: CLARABEL
+  max_iterations: 200
+  allow_optimal_inaccurate: false
+  noise_psd_watt_per_hz: 1.0e-12
+  energy_price_per_joule: 0.01
+  absolute_lex_tolerance: 1.0e-7
+  relative_lex_tolerance: 1.0e-7
+  residual_tolerance: 1.0e-5
+  active_time_tolerance_seconds: 1.0e-9
+  mec_dvfs_kappa: 1.0e-27
+  cloud_dvfs_kappa: 1.0e-27
+  mec_cpu_price_per_second: 0.10
+  cloud_cpu_price_per_second: 0.20
+  cloud_price_per_gcycle: 0.05
+  uplink_bandwidth_hz: 20000000.0
+  maximum_uplink_power_watt: 2.0
+
+# ============================================================
 # 阶段 A：实例生命周期和允许部署组合
 # ============================================================
 
@@ -130,6 +151,8 @@ rl_scenario:
       warm_exec_time_ms: 15.0
       cold_start_time_ms: 300.0
       output_ratio: 0.7
+      # 快层真实工作量单位：处理一个物理输入 bit 所需 CPU 周期数
+      cpu_cycles_per_input_bit: 1000.0
 
     - function_id: 1
       name: 特征提取
@@ -139,6 +162,7 @@ rl_scenario:
       warm_exec_time_ms: 30.0
       cold_start_time_ms: 500.0
       output_ratio: 0.4
+      cpu_cycles_per_input_bit: 1500.0
 
     - function_id: 2
       name: 异常检测
@@ -148,6 +172,7 @@ rl_scenario:
       warm_exec_time_ms: 50.0
       cold_start_time_ms: 800.0
       output_ratio: 0.1
+      cpu_cycles_per_input_bit: 2000.0
 
   sfc:
     sfc_id: 0
