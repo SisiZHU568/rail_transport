@@ -33,6 +33,7 @@ import random
 from typing import Any
 
 from src.topology import LinearRailTopology
+from src.orchestration_config import load_ctmc_rate_maps
 
 
 @dataclass(frozen=True)
@@ -625,11 +626,10 @@ def build_markov_failure_process(
         ]
     )
 
+    domain_rates, _ = load_ctmc_rate_maps(config)
     fault_domain_availability = {
-        item["domain_id"]: item["availability"]
-        for item in config["reliability"][
-            "fault_domains"
-        ]
+        domain_id: rates.steady_availability
+        for domain_id, rates in domain_rates.items()
     }
 
     topology_domain_ids = {

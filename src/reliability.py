@@ -31,6 +31,7 @@ from typing import Any
 
 from src.entities import SFCType
 from src.topology import LinearRailTopology
+from src.orchestration_config import load_ctmc_rate_maps
 
 
 @dataclass(frozen=True)
@@ -628,26 +629,11 @@ def build_fault_domain_reliability_model(
     """
 
     reliability_config = config["reliability"]
-
-    fault_domain_availability: dict[
-        int,
-        float,
-    ] = {}
-
-    for domain_config in (
-        reliability_config["fault_domains"]
-    ):
-        domain_id = domain_config["domain_id"]
-        availability = domain_config["availability"]
-
-        if domain_id in fault_domain_availability:
-            raise ValueError(
-                f"故障域 {domain_id} 重复配置。"
-            )
-
-        fault_domain_availability[domain_id] = (
-            availability
-        )
+    domain_rates, _ = load_ctmc_rate_maps(config)
+    fault_domain_availability = {
+        domain_id: rates.steady_availability
+        for domain_id, rates in domain_rates.items()
+    }
 
     return FaultDomainReliabilityModel(
         topology=topology,

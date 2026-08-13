@@ -20,6 +20,12 @@ from src.entities import (
 )
 
 
+def test_onboard_is_not_a_compute_node_type() -> None:
+    """首版函数部署节点只包含轨旁 MEC 和中心云。"""
+
+    assert {item.value for item in NodeType} == {"trackside", "cloud"}
+
+
 def test_create_edge_node() -> None:
     """
     测试能否创建一个合法的轨旁 MEC。

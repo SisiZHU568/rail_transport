@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from src.orchestration_config import load_phase_a_config
+
 
 def _require_mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
     """读取必需的字典配置，并给出比普通 ``KeyError`` 更清楚的提示。"""
@@ -274,6 +276,10 @@ def validate_config(config: dict[str, Any]) -> None:
     training_output = training.get("output_root")
     if not isinstance(training_output, str) or not training_output:
         raise ValueError("dppo.training.output_root 必须是非空字符串。")
+
+    # 阶段 A 的物理单位、CTMC 率和 VNF—节点组合在同一次加载中校验，
+    # 避免仿真运行到一半才发现引用或容量配置错误。
+    load_phase_a_config(config)
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:

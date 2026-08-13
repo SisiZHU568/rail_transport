@@ -16,9 +16,6 @@ class NodeType(str, Enum):
     计算节点类型。
     """
 
-    # 车载边缘节点
-    ONBOARD = "onboard"
-
     # 沿铁路部署的轨旁 MEC
     TRACKSIDE = "trackside"
 

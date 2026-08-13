@@ -33,6 +33,7 @@ from src.failure_process import (
     InfrastructureState,
 )
 from src.topology import LinearRailTopology
+from src.orchestration_config import load_ctmc_rate_maps
 
 
 @dataclass(frozen=True)
@@ -485,13 +486,10 @@ def build_windowed_markov_failure_process(
         ]
     )
 
+    domain_rates, _ = load_ctmc_rate_maps(config)
     fault_domain_availability = {
-        int(item["domain_id"]): float(
-            item["availability"]
-        )
-        for item in config["reliability"][
-            "fault_domains"
-        ]
+        domain_id: rates.steady_availability
+        for domain_id, rates in domain_rates.items()
     }
 
     topology_domain_ids = {

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.entities import EdgeNode, NodeType
+from src.orchestration_config import load_ctmc_rate_maps
 
 
 @dataclass(frozen=True)
@@ -405,6 +406,7 @@ def build_linear_topology(
         构建完成的铁路拓扑。
     """
 
+    _, node_rates = load_ctmc_rate_maps(config)
     mec_count = config["topology"]["mec_count"]
     spacing_m = config["topology"]["mec_spacing_m"]
     coverage_radius_m = config["topology"]["mec_coverage_radius_m"]
@@ -412,7 +414,6 @@ def build_linear_topology(
 
     cpu_capacity = config["node_resources"]["mec_cpu_capacity"]
     memory_capacity_mb = config["node_resources"]["mec_memory_mb"]
-    reliability = config["node_resources"]["mec_reliability"]
 
     if mec_count <= 0:
         raise ValueError("mec_count 必须大于 0。")
@@ -430,7 +431,8 @@ def build_linear_topology(
             node_type=NodeType.TRACKSIDE,
             cpu_capacity=cpu_capacity,
             memory_capacity_mb=memory_capacity_mb,
-            reliability=reliability,
+            # 理论可靠性与实际故障轨迹共用同一组连续时间率。
+            reliability=node_rates[index].steady_availability,
 
             # 故障域由配置显式给出，扩容实验不需要修改本文件。
             fault_domain=fault_domain_ids[index],
@@ -470,9 +472,7 @@ def build_linear_topology(
             memory_capacity_mb=config[
                 "node_resources"
             ]["cloud_memory_mb"],
-            reliability=config[
-                "node_resources"
-            ]["cloud_reliability"],
+            reliability=node_rates[mec_count].steady_availability,
             fault_domain=config[
                 "node_resources"
             ]["cloud_fault_domain_id"],

@@ -35,9 +35,6 @@ topology:
     - 1
     - 2
 
-  # 是否加入车载边缘节点
-  include_onboard: true
-
   # 是否加入中心云
   include_cloud: true
 
@@ -45,20 +42,63 @@ node_resources:
   # 轨旁 MEC 资源
   mec_cpu_capacity: 100.0
   mec_memory_mb: 8192.0
-  mec_reliability: 0.98
-
-  # 车载边缘节点资源
-  onboard_cpu_capacity: 60.0
-  onboard_memory_mb: 4096.0
-  onboard_reliability: 0.99
+  mec_cpu_capacity_cycles_per_second: 20000000000.0
+  mec_core_count: 8
 
   # 中心云资源
   cloud_cpu_capacity: 1000.0
   cloud_memory_mb: 65536.0
-  cloud_reliability: 0.999
+  cloud_cpu_capacity_cycles_per_second: 100000000000.0
+  cloud_core_count: 32
 
   # 中心云使用独立故障域，避免被误建模为某个轨旁区域的一部分
   cloud_fault_domain_id: 3
+
+# ============================================================
+# 阶段 A：实例生命周期和允许部署组合
+# ============================================================
+
+instance_lifecycle:
+  schema_version: phase-a-v1
+  price_version: debug-price-v1
+
+  # 零秒是合法档，表示不额外承诺保留；仍存在的实例按运行秒计费。
+  minimum_retention_seconds: 0.0
+  maximum_retention_seconds: 20.0
+  retention_step_seconds: 5.0
+
+  # 首版所有 VNF 均可部署在 5 个 MEC（0-4）和中心云（5）。
+  # 实例范围、单实例容量、冷启动和价格均按 VNF—节点组合读取。
+  allowed_deployments:
+    - function_id: 0
+      node_ids: [0, 1, 2, 3, 4, 5]
+      minimum_instances: 1
+      maximum_instances: 4
+      cold_start_seconds: 0.3
+      single_instance_max_cpu_cycles_per_second: 2000000000.0
+      deployment_cost_per_instance: 1.0
+      cold_start_cost_per_instance: 0.3
+      running_cost_per_instance_second: 0.001
+
+    - function_id: 1
+      node_ids: [0, 1, 2, 3, 4, 5]
+      minimum_instances: 1
+      maximum_instances: 4
+      cold_start_seconds: 0.5
+      single_instance_max_cpu_cycles_per_second: 2000000000.0
+      deployment_cost_per_instance: 1.0
+      cold_start_cost_per_instance: 0.5
+      running_cost_per_instance_second: 0.001
+
+    - function_id: 2
+      node_ids: [0, 1, 2, 3, 4, 5]
+      minimum_instances: 1
+      maximum_instances: 4
+      cold_start_seconds: 0.8
+      single_instance_max_cpu_cycles_per_second: 2000000000.0
+      deployment_cost_per_instance: 1.0
+      cold_start_cost_per_instance: 0.8
+      running_cost_per_instance_second: 0.001
 
 train:
   # 列车初始位置，单位为米
@@ -330,31 +370,31 @@ reliability:
   # 不允许位于同一个故障域。
   minimum_distinct_fault_domains: 2
 
-  # 故障域的可用率。
-  #
-  # 故障域故障可理解为：
-  # 公共供电故障、汇聚交换机故障、
-  # 公共回传链路故障或区域性基础设施故障。
-  fault_domains:
-    - domain_id: 0
-      availability: 0.995
-
-    - domain_id: 1
-      availability: 0.995
-
-    - domain_id: 2
-      availability: 0.995
-
-    # 中心云独立故障域
-    - domain_id: 3
-      availability: 0.999
-
   # ============================================================
 # 运行态随机故障与主备切换参数
 # ============================================================
 
 runtime_failure:
-  # 随机种子，用于保证多次实验可以复现
+  # 每个故障域和节点会从这个基础种子派生独立随机流。
+  base_seed: 42
+
+  # 连续时间故障率与恢复率，单位均为 1/秒。
+  # 当前比值保持旧调试配置的稳态可用度，阶段 A 不按时隙概率反推。
+  domain_rates:
+    - {id: 0, failure_rate_per_second: 0.00005, recovery_rate_per_second: 0.00995}
+    - {id: 1, failure_rate_per_second: 0.00005, recovery_rate_per_second: 0.00995}
+    - {id: 2, failure_rate_per_second: 0.00005, recovery_rate_per_second: 0.00995}
+    - {id: 3, failure_rate_per_second: 0.00001, recovery_rate_per_second: 0.00999}
+
+  node_rates:
+    - {id: 0, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
+    - {id: 1, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
+    - {id: 2, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
+    - {id: 3, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
+    - {id: 4, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
+    - {id: 5, failure_rate_per_second: 0.00001, recovery_rate_per_second: 0.00999}
+
+  # 以下旧字段只供尚未在 Task 2 替换的旧故障类运行；Task 2 同提交删除。
   random_seed: 42
 
   # 故障域处于失效状态时，
