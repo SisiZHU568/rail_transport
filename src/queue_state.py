@@ -17,6 +17,8 @@ class BatchRecord:
     service_id: int
     arrival_time: float
     absolute_deadline_time: float
+    total_input_equivalent_bits: float = 1.0
+    completed_input_equivalent_bits: float = 0.0
     completion_slot: int | None = None
     violation_recorded: bool = False
 
@@ -30,6 +32,17 @@ class BatchRecord:
             or self.absolute_deadline_time < self.arrival_time
         ):
             raise ValueError("deadline 不能早于到达时间。")
+        _positive_finite(
+            self.total_input_equivalent_bits,
+            "total_input_equivalent_bits",
+        )
+        if (
+            not math.isfinite(self.completed_input_equivalent_bits)
+            or self.completed_input_equivalent_bits < 0.0
+            or self.completed_input_equivalent_bits
+            > self.total_input_equivalent_bits + 1e-9
+        ):
+            raise ValueError("completed_input_equivalent_bits 超出批次总量。")
         if self.completion_slot is not None and self.completion_slot < 0:
             raise ValueError("completion_slot 不能为负。")
 
