@@ -7,7 +7,7 @@ import math
 import numpy as np
 
 from src.entities import ServerlessFunction, SFCType, SlotConstraintAudit, TrainState
-from src.failure_process import FailureProcess, InfrastructureState
+from src.failure_process import FailureProcess, FailureSnapshot
 from src.failure_risk_prediction import FailureRiskProvider
 from src.fast_slot_executor import FastSlotExecutionResult, FastSlotExecutor, FastSlotInput
 from src.mobility import TrainMobilityModel
@@ -30,7 +30,7 @@ class EpisodeTraceSlot:
 
     train_state: TrainState
     request_count: int
-    infrastructure_state: InfrastructureState
+    infrastructure_state: FailureSnapshot
     predicted_failure_risk: float
 
 

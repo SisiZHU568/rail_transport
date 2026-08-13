@@ -82,7 +82,7 @@ def _stream_seed(base_seed: int, entity_kind: str, entity_id: int) -> int:
 
 
 @dataclass(frozen=True)
-class InfrastructureState:
+class FailureSnapshot:
     """
     一个时隙中的基础设施状态。
     """
@@ -187,7 +187,7 @@ class FailureProcess(ABC):
     def state_for_slot(
         self,
         time_slot: int,
-    ) -> InfrastructureState:
+    ) -> FailureSnapshot:
         """
         返回指定时隙的基础设施状态。
         """
@@ -312,7 +312,7 @@ class ScriptedFailureProcess(FailureProcess):
     def state_for_slot(
         self,
         time_slot: int,
-    ) -> InfrastructureState:
+    ) -> FailureSnapshot:
         """
         返回人工指定的故障状态。
         """
@@ -372,7 +372,7 @@ class ScriptedFailureProcess(FailureProcess):
         )
         self._previous_effective_up = effective_up
 
-        return InfrastructureState(
+        return FailureSnapshot(
             time_slot=time_slot,
             domain_up=domain_up,
             node_local_up=node_local_up,
@@ -569,7 +569,7 @@ class MarkovFailureProcess(FailureProcess):
     def state_for_slot(
         self,
         time_slot: int,
-    ) -> InfrastructureState:
+    ) -> FailureSnapshot:
         """
         返回下一个连续时隙的基础设施状态。
 
@@ -603,7 +603,7 @@ class MarkovFailureProcess(FailureProcess):
             )
         )
 
-        snapshot = InfrastructureState(
+        snapshot = FailureSnapshot(
             time_slot=time_slot,
             domain_up=dict(self._domain_up),
             node_local_up=dict(

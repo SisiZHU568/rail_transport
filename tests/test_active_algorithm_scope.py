@@ -64,3 +64,23 @@ def test_active_source_and_config_content_has_no_retired_algorithm() -> None:
             offenders.append(path.relative_to(root).as_posix())
 
     assert offenders == []
+
+
+def test_active_python_tree_uses_only_failure_snapshot() -> None:
+    """活动运行路径不能继续保留旧故障快照名称。"""
+
+    root = Path(__file__).resolve().parents[1]
+    retired = "Infrastructure" + "State"
+    candidates = (
+        tuple((root / "src").rglob("*.py"))
+        + tuple((root / "tests").rglob("*.py"))
+        + tuple(root.glob("run_*.py"))
+    )
+    offenders = [
+        path.relative_to(root).as_posix()
+        for path in candidates
+        if path.name != "test_active_algorithm_scope.py"
+        and retired in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == []

@@ -5,6 +5,7 @@ test_risk_aware_failure_process.py
 """
 
 from src.config import load_config
+from src.orchestration_config import CTMCRates
 from src.risk_aware_failure_process import (
     FailureRiskMultiplierWindow,
     WindowedMarkovFailureProcess,
@@ -43,14 +44,7 @@ def test_probability_window_contains_boundaries() -> None:
 
 
 def test_high_risk_multiplier_can_force_failure() -> None:
-    """
-    节点基础失效概率为0.2。
-
-    时隙1的放大倍数为5，
-    因而有效失效概率变成1.0。
-
-    所有节点在时隙1均应发生局部失效。
-    """
+    """高风险窗口只放大连续时间失效率，并重新精确离散。"""
 
     topology = build_test_topology()
 
@@ -66,22 +60,15 @@ def test_high_risk_multiplier_can_force_failure() -> None:
 
     process = WindowedMarkovFailureProcess(
         topology=topology,
-        domain_failure_probabilities={
-            domain_id: 0.0
+        domain_rates={
+            domain_id: CTMCRates(0.1, 0.5)
             for domain_id in domain_ids
         },
-        domain_recovery_probabilities={
-            domain_id: 1.0
-            for domain_id in domain_ids
-        },
-        node_failure_probabilities={
-            node_id: 0.2
+        node_rates={
+            node_id: CTMCRates(0.2, 0.5)
             for node_id in node_ids
         },
-        node_recovery_probabilities={
-            node_id: 1.0
-            for node_id in node_ids
-        },
+        slot_seconds=1.0,
         risk_windows=[
             FailureRiskMultiplierWindow(
                 start_slot=1,
@@ -92,16 +79,11 @@ def test_high_risk_multiplier_can_force_failure() -> None:
         random_seed=42,
     )
 
-    state0 = process.state_for_slot(0)
-    state1 = process.state_for_slot(1)
+    base = process.transition_for_slot("node", 0, time_slot=0)
+    high = process.transition_for_slot("node", 0, time_slot=1)
 
-    assert all(
-        state0.node_local_up.values()
-    )
-
-    assert not any(
-        state1.node_local_up.values()
-    )
+    assert high.failure_probability > base.failure_probability
+    assert high.recovery_probability < base.recovery_probability
 
 
 def test_reset_reproduces_same_sequence() -> None:
@@ -123,22 +105,15 @@ def test_reset_reproduces_same_sequence() -> None:
 
     process = WindowedMarkovFailureProcess(
         topology=topology,
-        domain_failure_probabilities={
-            domain_id: 0.1
+        domain_rates={
+            domain_id: CTMCRates(0.1, 0.5)
             for domain_id in domain_ids
         },
-        domain_recovery_probabilities={
-            domain_id: 0.5
-            for domain_id in domain_ids
-        },
-        node_failure_probabilities={
-            node_id: 0.1
+        node_rates={
+            node_id: CTMCRates(0.1, 0.5)
             for node_id in node_ids
         },
-        node_recovery_probabilities={
-            node_id: 0.5
-            for node_id in node_ids
-        },
+        slot_seconds=1.0,
         risk_windows=[
             FailureRiskMultiplierWindow(
                 start_slot=2,

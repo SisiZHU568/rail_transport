@@ -394,17 +394,6 @@ runtime_failure:
     - {id: 4, failure_rate_per_second: 0.0002, recovery_rate_per_second: 0.0098}
     - {id: 5, failure_rate_per_second: 0.00001, recovery_rate_per_second: 0.00999}
 
-  # 以下旧字段只供尚未在 Task 2 替换的旧故障类运行；Task 2 同提交删除。
-  random_seed: 42
-
-  # 故障域处于失效状态时，
-  # 每个时隙恢复正常的概率
-  domain_recovery_probability_per_slot: 0.4
-
-  # MEC 节点局部失效后，
-  # 每个时隙恢复正常的概率
-  node_recovery_probability_per_slot: 0.5
-
   # 每个函数从主实例切换到备用实例时，
   # 产生的故障检测与状态切换时延
   failover_delay_ms_per_function: 20.0

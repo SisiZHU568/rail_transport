@@ -12,7 +12,7 @@ from src.entities import (
     SlotConstraintAudit,
     TrainState,
 )
-from src.failure_process import InfrastructureState
+from src.failure_process import FailureSnapshot
 from src.fast_convex_scheduler import (
     FastConvexScheduler,
     FastConvexSchedulingResult,
@@ -71,7 +71,7 @@ class FastSlotInput:
 
     train_state: TrainState
     request_count: int
-    infrastructure_state: InfrastructureState
+    infrastructure_state: FailureSnapshot
     slow_decision: SlowTimescaleDecision | None
     previous_candidate_map: (
         dict[int, tuple[int, ...]] | None
@@ -425,7 +425,7 @@ class FastSlotExecutor:
 
     def _operational_node_ids(
         self,
-        infrastructure_state: InfrastructureState,
+        infrastructure_state: FailureSnapshot,
     ) -> frozenset[int]:
         """同时检查轨旁MEC和中心云的局部、故障域两层状态。"""
 

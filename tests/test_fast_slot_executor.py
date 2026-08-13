@@ -13,7 +13,7 @@ from src.entities import (
     SFCType,
     TrainState,
 )
-from src.failure_process import InfrastructureState
+from src.failure_process import FailureSnapshot
 from src.fast_optimizer import FastFeasibilityOptimizer
 from src.fast_convex_scheduler import FastConvexScheduler
 from src.fast_slot_executor import (
@@ -192,7 +192,7 @@ def build_slot_input(*, node_count: int = 3) -> FastSlotInput:
             remaining_dwell_time_s=10.0,
         ),
         request_count=1,
-        infrastructure_state=InfrastructureState(
+        infrastructure_state=FailureSnapshot(
             time_slot=0,
             domain_up={node_id: True for node_id in range(node_count)},
             node_local_up={node_id: True for node_id in range(node_count)},
