@@ -4,12 +4,18 @@ test_failure_process.py
 测试确定性故障过程和马尔可夫随机故障过程。
 """
 
+import math
+
+import pytest
+
 from src.config import load_config
 from src.failure_process import (
+    CTMCTransition,
     MarkovFailureProcess,
     ScriptedFailureProcess,
     build_markov_failure_process,
 )
+from src.orchestration_config import CTMCRates
 from src.topology import build_linear_topology
 
 
@@ -85,13 +91,7 @@ def test_domain_failure_disables_all_domain_nodes() -> None:
 
 
 def test_markov_failure_and_recovery() -> None:
-    """
-    失效概率和恢复概率都设为1。
-
-    时隙0：初始正常；
-    时隙1：全部失效；
-    时隙2：全部恢复。
-    """
+    """零失效率恒正常，零恢复率恒失效。"""
 
     topology = build_test_topology()
 
@@ -105,41 +105,35 @@ def test_markov_failure_and_recovery() -> None:
         for node in topology.compute_nodes
     }
 
-    process = MarkovFailureProcess(
+    always_up = MarkovFailureProcess(
         topology=topology,
-        domain_failure_probabilities={
-            domain_id: 1.0
+        domain_rates={
+            domain_id: CTMCRates(0.0, 1.0)
             for domain_id in domain_ids
         },
-        domain_recovery_probabilities={
-            domain_id: 1.0
+        node_rates={
+            node_id: CTMCRates(0.0, 1.0)
+            for node_id in node_ids
+        },
+        slot_seconds=1.0,
+        random_seed=42,
+    )
+    always_down = MarkovFailureProcess(
+        topology=topology,
+        domain_rates={
+            domain_id: CTMCRates(1.0, 0.0)
             for domain_id in domain_ids
         },
-        node_failure_probabilities={
-            node_id: 1.0
+        node_rates={
+            node_id: CTMCRates(1.0, 0.0)
             for node_id in node_ids
         },
-        node_recovery_probabilities={
-            node_id: 1.0
-            for node_id in node_ids
-        },
+        slot_seconds=1.0,
         random_seed=42,
     )
 
-    state0 = process.state_for_slot(0)
-    state1 = process.state_for_slot(1)
-    state2 = process.state_for_slot(2)
-
-    assert all(state0.domain_up.values())
-    assert all(state0.node_local_up.values())
-
-    assert not any(state1.domain_up.values())
-    assert not any(
-        state1.node_local_up.values()
-    )
-
-    assert all(state2.domain_up.values())
-    assert all(state2.node_local_up.values())
+    assert all(always_up.state_for_slot(0).domain_up.values())
+    assert not any(always_down.state_for_slot(0).domain_up.values())
 
 
 def test_markov_reset_reproduces_same_sequence() -> None:
@@ -162,22 +156,15 @@ def test_markov_reset_reproduces_same_sequence() -> None:
 
     process = MarkovFailureProcess(
         topology=topology,
-        domain_failure_probabilities={
-            domain_id: 0.2
+        domain_rates={
+            domain_id: CTMCRates(0.2, 0.5)
             for domain_id in domain_ids
         },
-        domain_recovery_probabilities={
-            domain_id: 0.5
-            for domain_id in domain_ids
-        },
-        node_failure_probabilities={
-            node_id: 0.2
+        node_rates={
+            node_id: CTMCRates(0.2, 0.5)
             for node_id in node_ids
         },
-        node_recovery_probabilities={
-            node_id: 0.5
-            for node_id in node_ids
-        },
+        slot_seconds=1.0,
         random_seed=123,
     )
 
@@ -240,3 +227,49 @@ def test_scripted_failure_process_can_fail_cloud_node() -> None:
         node_id=cloud_node.node_id,
         topology=topology,
     ) is False
+
+
+def test_exact_ctmc_discretization_preserves_stationary_availability() -> None:
+    """矩阵指数离散后必须保留连续时间链的稳态可用度。"""
+
+    rates = CTMCRates(0.2, 0.8)
+    transition = CTMCTransition.from_rates(rates, slot_seconds=3.0)
+    expected_change = 1.0 - math.exp(-3.0)
+
+    assert transition.failure_probability == pytest.approx(0.2 * expected_change)
+    assert transition.recovery_probability == pytest.approx(0.8 * expected_change)
+    assert transition.recovery_probability / (
+        transition.failure_probability + transition.recovery_probability
+    ) == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize(
+    ("rates", "expected_up"),
+    ((CTMCRates(0.0, 1.0), True), (CTMCRates(1.0, 0.0), False)),
+)
+def test_stationary_initialization_handles_zero_rate_boundaries(
+    rates: CTMCRates,
+    expected_up: bool,
+) -> None:
+    """λ=0 与 μ=0 的稳态初始状态没有随机歧义。"""
+
+    assert MarkovFailureProcess.stationary_initial_state(rates, draw=0.5) is expected_up
+
+
+def test_effective_events_follow_domain_and_node_combined_state() -> None:
+    """故障域恢复时，局部仍故障的节点不能出现在恢复集合。"""
+
+    topology = build_test_topology()
+    process = ScriptedFailureProcess(
+        topology=topology,
+        down_domains_by_slot={0: {0}},
+        down_nodes_by_slot={0: {0}, 1: {0}},
+    )
+
+    first = process.state_for_slot(0)
+    second = process.state_for_slot(1)
+
+    assert first.version + 1 == second.version
+    assert 0 not in second.newly_available_node_ids
+    assert 1 in second.newly_available_node_ids
+    assert second.is_node_operational(0, topology) is False

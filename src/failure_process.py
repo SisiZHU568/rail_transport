@@ -29,11 +29,56 @@ failure_process.py
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import hashlib
+import math
 import random
 from typing import Any
 
 from src.topology import LinearRailTopology
-from src.orchestration_config import load_ctmc_rate_maps
+from src.orchestration_config import CTMCRates, load_phase_a_config
+
+
+@dataclass(frozen=True)
+class CTMCTransition:
+    """连续时间两状态链在相邻时隙边界之间的精确转移概率。"""
+
+    failure_probability: float
+    recovery_probability: float
+
+    @classmethod
+    def from_rates(
+        cls,
+        rates: CTMCRates,
+        slot_seconds: float,
+    ) -> "CTMCTransition":
+        """使用生成矩阵指数闭式解离散连续时间率。"""
+
+        if not math.isfinite(slot_seconds) or slot_seconds <= 0.0:
+            raise ValueError("slot_seconds 必须是正有限数。")
+        total_rate = (
+            rates.failure_rate_per_second
+            + rates.recovery_rate_per_second
+        )
+        change_probability = -math.expm1(-total_rate * slot_seconds)
+        return cls(
+            failure_probability=(
+                rates.failure_rate_per_second
+                / total_rate
+                * change_probability
+            ),
+            recovery_probability=(
+                rates.recovery_rate_per_second
+                / total_rate
+                * change_probability
+            ),
+        )
+
+
+def _stream_seed(base_seed: int, entity_kind: str, entity_id: int) -> int:
+    """为每个域和节点派生稳定、互不共享状态的随机流种子。"""
+
+    payload = f"{base_seed}:{entity_kind}:{entity_id}".encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
 
 
 @dataclass(frozen=True)
@@ -55,6 +100,13 @@ class InfrastructureState:
     # 故障域状态含义不同，因此两层状态不是重复记录。
     # 注意，这里还没有结合所属故障域状态。
     node_local_up: dict[int, bool]
+
+    # 快照版本在同一故障过程内单调递增；脚本过程直接使用时隙号。
+    version: int = 0
+
+    # 事件集合由“故障域 AND 节点局部状态”的有效状态边沿生成。
+    newly_unavailable_node_ids: tuple[int, ...] = ()
+    newly_available_node_ids: tuple[int, ...] = ()
 
     def is_node_operational(
         self,
@@ -212,6 +264,8 @@ class ScriptedFailureProcess(FailureProcess):
                     "故障时隙不能小于 0。"
                 )
 
+        self._previous_effective_up: dict[int, bool] | None = None
+
         configured_domain_ids = {
             domain_id
             for domain_ids
@@ -250,8 +304,10 @@ class ScriptedFailureProcess(FailureProcess):
 
     def reset(self) -> None:
         """
-        确定性故障过程没有内部随机状态。
+        重置有效状态历史，使再次读取同一脚本得到相同事件。
         """
+
+        self._previous_effective_up = None
 
     def state_for_slot(
         self,
@@ -290,10 +346,39 @@ class ScriptedFailureProcess(FailureProcess):
             for node_id in self.node_ids
         }
 
+        effective_up = {
+            node.node_id: (
+                domain_up[node.fault_domain]
+                and node_local_up[node.node_id]
+            )
+            for node in self.topology.compute_nodes
+        }
+        previous = self._previous_effective_up or {
+            node_id: True for node_id in effective_up
+        }
+        newly_unavailable = tuple(
+            sorted(
+                node_id
+                for node_id, is_up in effective_up.items()
+                if previous[node_id] and not is_up
+            )
+        )
+        newly_available = tuple(
+            sorted(
+                node_id
+                for node_id, is_up in effective_up.items()
+                if not previous[node_id] and is_up
+            )
+        )
+        self._previous_effective_up = effective_up
+
         return InfrastructureState(
             time_slot=time_slot,
             domain_up=domain_up,
             node_local_up=node_local_up,
+            version=time_slot,
+            newly_unavailable_node_ids=newly_unavailable,
+            newly_available_node_ids=newly_available,
         )
 
 
@@ -311,28 +396,15 @@ class MarkovFailureProcess(FailureProcess):
         UP --失效概率--> DOWN
         DOWN --恢复概率--> UP
 
-    时隙0默认所有故障域和节点都正常。
+    初始状态按各自稳态可用度采样，避免短仿真从全正常状态开始的偏差。
     """
 
     def __init__(
         self,
         topology: LinearRailTopology,
-        domain_failure_probabilities: dict[
-            int,
-            float,
-        ],
-        domain_recovery_probabilities: dict[
-            int,
-            float,
-        ],
-        node_failure_probabilities: dict[
-            int,
-            float,
-        ],
-        node_recovery_probabilities: dict[
-            int,
-            float,
-        ],
+        domain_rates: dict[int, CTMCRates],
+        node_rates: dict[int, CTMCRates],
+        slot_seconds: float,
         random_seed: int,
     ) -> None:
         """
@@ -341,6 +413,7 @@ class MarkovFailureProcess(FailureProcess):
 
         self.topology = topology
         self.random_seed = random_seed
+        self.slot_seconds = slot_seconds
 
         self.domain_ids = tuple(
             sorted(
@@ -358,96 +431,70 @@ class MarkovFailureProcess(FailureProcess):
             )
         )
 
-        self.domain_failure_probabilities = dict(
-            domain_failure_probabilities
-        )
-
-        self.domain_recovery_probabilities = dict(
-            domain_recovery_probabilities
-        )
-
-        self.node_failure_probabilities = dict(
-            node_failure_probabilities
-        )
-
-        self.node_recovery_probabilities = dict(
-            node_recovery_probabilities
-        )
-
-        self._validate_probability_dictionary(
-            values=self.domain_failure_probabilities,
-            expected_ids=set(self.domain_ids),
-            parameter_name="故障域失效概率",
-        )
-
-        self._validate_probability_dictionary(
-            values=self.domain_recovery_probabilities,
-            expected_ids=set(self.domain_ids),
-            parameter_name="故障域恢复概率",
-        )
-
-        self._validate_probability_dictionary(
-            values=self.node_failure_probabilities,
-            expected_ids=set(self.node_ids),
-            parameter_name="节点失效概率",
-        )
-
-        self._validate_probability_dictionary(
-            values=self.node_recovery_probabilities,
-            expected_ids=set(self.node_ids),
-            parameter_name="节点恢复概率",
-        )
-
-        self._random = random.Random(
-            self.random_seed
-        )
+        self.domain_rates = dict(domain_rates)
+        self.node_rates = dict(node_rates)
+        if set(self.domain_rates) != set(self.domain_ids):
+            raise ValueError("故障域 CTMC 率的编号集合不完整。")
+        if set(self.node_rates) != set(self.node_ids):
+            raise ValueError("节点 CTMC 率的编号集合不完整。")
+        self.domain_transitions = {
+            entity_id: CTMCTransition.from_rates(rates, slot_seconds)
+            for entity_id, rates in self.domain_rates.items()
+        }
+        self.node_transitions = {
+            entity_id: CTMCTransition.from_rates(rates, slot_seconds)
+            for entity_id, rates in self.node_rates.items()
+        }
 
         self._domain_up: dict[int, bool] = {}
         self._node_local_up: dict[int, bool] = {}
+        self._domain_random: dict[int, random.Random] = {}
+        self._node_random: dict[int, random.Random] = {}
+        self._previous_effective_up: dict[int, bool] = {}
         self._next_time_slot = 0
 
         self.reset()
 
     @staticmethod
-    def _validate_probability_dictionary(
-        values: dict[int, float],
-        expected_ids: set[int],
-        parameter_name: str,
-    ) -> None:
-        """
-        检查概率字典是否合法。
-        """
+    def stationary_initial_state(rates: CTMCRates, draw: float) -> bool:
+        """用稳态可用度和给定随机数确定初始 UP/DOWN。"""
 
-        if set(values) != expected_ids:
-            raise ValueError(
-                f"{parameter_name}的编号集合不完整。"
-            )
-
-        for entity_id, probability in values.items():
-            if not 0 <= probability <= 1:
-                raise ValueError(
-                    f"{parameter_name}中编号"
-                    f"{entity_id}的概率不在[0,1]。"
-                )
+        if not 0.0 <= draw < 1.0:
+            raise ValueError("稳态初始化随机数必须位于 [0, 1)。")
+        return draw < rates.steady_availability
 
     def reset(self) -> None:
         """
-        恢复随机种子和初始正常状态。
+        重建所有独立随机流并按稳态分布初始化。
         """
 
-        self._random = random.Random(
-            self.random_seed
-        )
-
-        self._domain_up = {
-            domain_id: True
+        self._domain_random = {
+            domain_id: random.Random(
+                _stream_seed(self.random_seed, "domain", domain_id)
+            )
             for domain_id in self.domain_ids
         }
-
-        self._node_local_up = {
-            node_id: True
+        self._node_random = {
+            node_id: random.Random(
+                _stream_seed(self.random_seed, "node", node_id)
+            )
             for node_id in self.node_ids
         }
+        self._domain_up = {
+            domain_id: self.stationary_initial_state(
+                self.domain_rates[domain_id],
+                self._domain_random[domain_id].random(),
+            )
+            for domain_id in self.domain_ids
+        }
+        self._node_local_up = {
+            node_id: self.stationary_initial_state(
+                self.node_rates[node_id],
+                self._node_random[node_id].random(),
+            )
+            for node_id in self.node_ids
+        }
+        self._previous_effective_up = self._effective_node_states()
 
         self._next_time_slot = 0
 
@@ -463,25 +510,21 @@ class MarkovFailureProcess(FailureProcess):
 
             if currently_up:
                 transition_probability = (
-                    self.domain_failure_probabilities[
-                        domain_id
-                    ]
+                    self.domain_transitions[domain_id].failure_probability
                 )
 
                 if (
-                    self._random.random()
+                    self._domain_random[domain_id].random()
                     < transition_probability
                 ):
                     self._domain_up[domain_id] = False
             else:
                 transition_probability = (
-                    self.domain_recovery_probabilities[
-                        domain_id
-                    ]
+                    self.domain_transitions[domain_id].recovery_probability
                 )
 
                 if (
-                    self._random.random()
+                    self._domain_random[domain_id].random()
                     < transition_probability
                 ):
                     self._domain_up[domain_id] = True
@@ -493,28 +536,35 @@ class MarkovFailureProcess(FailureProcess):
 
             if currently_up:
                 transition_probability = (
-                    self.node_failure_probabilities[
-                        node_id
-                    ]
+                    self.node_transitions[node_id].failure_probability
                 )
 
                 if (
-                    self._random.random()
+                    self._node_random[node_id].random()
                     < transition_probability
                 ):
                     self._node_local_up[node_id] = False
             else:
                 transition_probability = (
-                    self.node_recovery_probabilities[
-                        node_id
-                    ]
+                    self.node_transitions[node_id].recovery_probability
                 )
 
                 if (
-                    self._random.random()
+                    self._node_random[node_id].random()
                     < transition_probability
                 ):
                     self._node_local_up[node_id] = True
+
+    def _effective_node_states(self) -> dict[int, bool]:
+        """结合域和节点隐藏状态生成实际可用状态。"""
+
+        return {
+            node.node_id: (
+                self._domain_up[node.fault_domain]
+                and self._node_local_up[node.node_id]
+            )
+            for node in self.topology.compute_nodes
+        }
 
     def state_for_slot(
         self,
@@ -533,11 +583,25 @@ class MarkovFailureProcess(FailureProcess):
                 "0、1、2、...的顺序访问时隙。"
             )
 
-        # 时隙0使用初始全正常状态。
-        #
-        # 从时隙1开始，每个时隙先进行一次状态转移。
+        # 时隙0使用稳态初始化结果；后续时隙先进行一次边界状态转移。
         if time_slot > 0:
             self._update_states()
+
+        effective_up = self._effective_node_states()
+        newly_unavailable = tuple(
+            sorted(
+                node_id
+                for node_id, is_up in effective_up.items()
+                if self._previous_effective_up[node_id] and not is_up
+            )
+        )
+        newly_available = tuple(
+            sorted(
+                node_id
+                for node_id, is_up in effective_up.items()
+                if not self._previous_effective_up[node_id] and is_up
+            )
+        )
 
         snapshot = InfrastructureState(
             time_slot=time_slot,
@@ -545,52 +609,15 @@ class MarkovFailureProcess(FailureProcess):
             node_local_up=dict(
                 self._node_local_up
             ),
+            version=time_slot,
+            newly_unavailable_node_ids=newly_unavailable,
+            newly_available_node_ids=newly_available,
         )
 
+        self._previous_effective_up = effective_up
         self._next_time_slot += 1
 
         return snapshot
-
-
-def _failure_probability_from_availability(
-    availability: float,
-    recovery_probability: float,
-) -> float:
-    """
-    根据长期可用率和恢复概率计算失效概率。
-
-    二状态马尔可夫稳态关系：
-
-        A = μ / (λ + μ)
-
-    因此：
-
-        λ = μ(1-A) / A
-    """
-
-    if not 0 < availability <= 1:
-        raise ValueError(
-            "长期可用率必须位于 (0, 1]。"
-        )
-
-    if not 0 <= recovery_probability <= 1:
-        raise ValueError(
-            "恢复概率必须位于 [0, 1]。"
-        )
-
-    failure_probability = (
-        recovery_probability
-        * (1.0 - availability)
-        / availability
-    )
-
-    if failure_probability > 1:
-        raise ValueError(
-            "根据当前可用率和恢复概率得到的"
-            "失效概率大于1。"
-        )
-
-    return failure_probability
 
 
 def build_markov_failure_process(
@@ -602,9 +629,9 @@ def build_markov_failure_process(
     根据配置文件创建随机故障过程。
     """
 
-    runtime_config = config["runtime_failure"]
+    phase_a = load_phase_a_config(config)
     selected_random_seed = (
-        runtime_config["random_seed"]
+        phase_a.failure_base_seed
         if random_seed is None
         else random_seed
     )
@@ -614,24 +641,6 @@ def build_markov_failure_process(
             "随机种子必须是整数。"
         )
 
-    domain_recovery_probability = (
-        runtime_config[
-            "domain_recovery_probability_per_slot"
-        ]
-    )
-
-    node_recovery_probability = (
-        runtime_config[
-            "node_recovery_probability_per_slot"
-        ]
-    )
-
-    domain_rates, _ = load_ctmc_rate_maps(config)
-    fault_domain_availability = {
-        domain_id: rates.steady_availability
-        for domain_id, rates in domain_rates.items()
-    }
-
     topology_domain_ids = {
         node.fault_domain
         for node in topology.compute_nodes
@@ -639,7 +648,7 @@ def build_markov_failure_process(
 
     missing_domain_ids = (
         topology_domain_ids
-        - set(fault_domain_availability)
+        - set(phase_a.domain_rates)
     )
 
     if missing_domain_ids:
@@ -648,60 +657,17 @@ def build_markov_failure_process(
             f"{sorted(missing_domain_ids)}。"
         )
 
-    domain_failure_probabilities = {
-        domain_id: (
-            _failure_probability_from_availability(
-                availability=(
-                    fault_domain_availability[
-                        domain_id
-                    ]
-                ),
-                recovery_probability=(
-                    domain_recovery_probability
-                ),
-            )
-        )
-        for domain_id in topology_domain_ids
-    }
-
-    domain_recovery_probabilities = {
-        domain_id: domain_recovery_probability
-        for domain_id in topology_domain_ids
-    }
-
-    node_failure_probabilities = {
-        node.node_id: (
-            _failure_probability_from_availability(
-                availability=(
-                    node.reliability
-                ),
-                recovery_probability=(
-                    node_recovery_probability
-                ),
-            )
-        )
-        for node in topology.compute_nodes
-    }
-
-    node_recovery_probabilities = {
-        node.node_id: node_recovery_probability
-        for node in topology.compute_nodes
-    }
-
     return MarkovFailureProcess(
         topology=topology,
-        domain_failure_probabilities=(
-            domain_failure_probabilities
-        ),
-        domain_recovery_probabilities=(
-            domain_recovery_probabilities
-        ),
-        node_failure_probabilities=(
-            node_failure_probabilities
-        ),
-        node_recovery_probabilities=(
-            node_recovery_probabilities
-        ),
+        domain_rates={
+            domain_id: phase_a.domain_rates[domain_id]
+            for domain_id in topology_domain_ids
+        },
+        node_rates={
+            node.node_id: phase_a.node_rates[node.node_id]
+            for node in topology.compute_nodes
+        },
+        slot_seconds=phase_a.fast_slot_seconds,
         random_seed=selected_random_seed,
     )
 
