@@ -2,7 +2,7 @@
 
 日期：2026-08-13
 
-状态：三轮书面 review 修订已纳入，等待最终复审
+状态：四轮书面 review 修订已纳入，等待最终复审
 目标分支：`codex/dppo-main-algorithm`
 
 ## 1. 文档地位与研究边界
@@ -23,6 +23,10 @@
 - 跨时隙队列与 EDF 审计器负责严格流水线因果性和批次级真实 SLA；
 - 理论可靠性采用稳态点可用度，实际运行评价采用持续性 CTMC 故障—恢复轨迹。
 
+首版的多类轨道业务共享同一条逻辑 SFC，且共享完全相同的 VNF 顺序、每阶段 CPU 周期需求 \(C_r\)、输出比例 \(\rho_r\) 和 SFC 可靠性目标。业务类别 \(s\) 只允许在到达过程、批次输入量和 SLA 截止时间上不同；不同截止时间通过批次级 EDF 优先级体现。上行仍按业务类别分配无线资源，上行完成后可聚合进入同一阶段队列，因此阶段队列和快层变量不需要业务下标。`service_id` 只用于批次身份、上行分类、截止时间和分类统计，不改变阶段资源参数。
+
+若未来允许业务使用不同 SFC、\(C_r\)、\(\rho_r\) 或可靠性目标，必须把阶段队列、执行量和有线商品流扩展为 \(Q_{s,r,i,t}\)、\(z_{s,r,i,t}\)、\(x_{s,r,d,e,t}\)，并按业务分别解码和审计可靠性；该扩展不属于首版研究范围。
+
 首版不研究：
 
 - 车载 VNF 部署或本地计算；
@@ -31,6 +35,7 @@
 - GNN、Transformer 或注意力式可变规模策略；
 - CP-SAT、MILP 或启发式部署回退；
 - 冷实例被快层临时激活；
+- 不同业务类别使用不同 SFC 或不同 VNF 资源/可靠性参数；
 - 将最终测试集用于模型、超参数或检查点选择。
 
 ## 2. 实施原则与阶段顺序
@@ -75,7 +80,7 @@
 3. `current_slot >= retention_deadline_slot` 的实例标记为可缩容，但不自动删除；
 4. 从公共随机轨迹读取故障域、节点、负载、信道和移动状态；
 5. 销毁刚失效节点上的全部温实例和启动中实例；恢复节点保持为空；
-6. 队列层原子扫描所有目标绑定片段：当目标节点失效或对应 VNF 已无健康温实例时清除 `routing_target_node`；片段位置和可用时隙不变，不产生免费转发；
+6. 队列层原子扫描当前已经到达并位于阶段队列中的目标绑定片段：当目标节点失效或对应 VNF 已无健康温实例时清除 `routing_target_node`；片段位置和可用时隙不变，不产生免费转发；仍在途的不可变记录不在本步骤修改，按 §5.1 到达后再清除失效目标；
 7. 新业务批次进入上行队列；
 8. 若为慢帧边界，编排层原子生成统一 `ObservationBundle`，DPPO 只读取其中的编码观察并生成连续评分；
 9. 安全解码器生成部署计划，生命周期层原子提交，新增实例进入冷启动；
@@ -297,7 +302,7 @@ m^{active}_{k,i,t}=m^{STARTING}_{k,i,t}+m^{WARM}_{k,i,t}.
 
 ### 5.1 队列状态与片段真值
 
-队列层持有上行队列、以 `(stage_id, node_id)` 为键的 VNF 阶段队列，以及在途事件集合。
+队列层持有按业务类别区分的上行队列、以 `(stage_id, location, routing_target_node)` 为规范键的共享 SFC 阶段队列，以及在途事件集合。
 
 片段只保存原始输入等效量作为唯一真值：
 
@@ -334,6 +339,8 @@ input_equivalent_bits
 ```
 
 `fragment.input_equivalent_bits` 与记录顶层等效量必须在容差内一致；顶层字段用于快速守恒审计，不构成第二份可修改真值。
+
+`InTransitRecord` 创建后直到 `arrival_slot` 都不可修改，包括其内嵌片段的 `routing_target_node`。若传输途中目标节点失效或失去对应健康温实例，记录仍按原链路和到达时隙到达 `destination_node_id`；到达提交时编排层根据当前生命周期/故障快照创建一个新的片段副本，并立即把失效的 `routing_target_node` 置为 `null` 后加入未绑定子队列。不得在飞行途中替换不可变记录，也不得改变传播时延或瞬移到其他节点。
 
 设第 \(r\) 个 VNF 前的累计输出比例：
 
@@ -459,6 +466,7 @@ completion\_slot\cdot\Delta t
 - 有线传播时隙和移动入口 MEC 正确；
 - EDF 排序、部分服务、多出口和确定性拆分；
 - 故障节点队列保留、禁止执行但允许转发；
+- 在途目标失效时不可变记录保持原字节，到达后才生成解绑片段；
 - 截止边界、迟到完成和违约只计一次；
 - 排空期、截断批次和成功率分母正确；
 - 版本过期或守恒失败时原子拒绝；
@@ -526,7 +534,7 @@ d_e^{prop}>0.
 
 ### 6.3 单列车多业务无线模型
 
-首版是一台列车发射机、多个业务类别。变量为：
+首版是一台列车发射机、多个业务类别，并遵循 §1 的共享单一逻辑 SFC 假设。业务下标只保留在上行无线队列和批次元数据中；上传后的阶段执行/转发按共同 \(r\) 聚合，再由 EDF 保留业务截止时间差异。变量为：
 
 \[
 q^{UL}_{s,t},\quad b^{UL}_{s,t},\quad p^{UL}_{s,t}.
@@ -1149,20 +1157,26 @@ path\_bit\_cost_{h,i}\,
 \gamma_k\widehat y^{eq}_{k,h,i}.
 \]
 
-这是确定性的容量目标＋贪心最小单位费用运输规则，不声称求解未来最优流。只有 VNF 1 使用服务 MEC 作为入口源；VNF \(k>1\) 同时处理其现有队列/在途量和上一阶段代理实际完成量。不可达或容量不足的供应不会使整个计划变为正无穷，而是进入共享预测缺口：
+这是确定性的容量目标＋贪心最小单位费用运输规则，不声称求解未来最优流。只有 VNF 1 使用服务 MEC 作为入口源；VNF \(k>1\) 同时处理其现有队列/在途量和上一阶段代理实际完成量。不可达或容量不足的供应不会使整个计划变为正无穷，而是留在教师虚拟队列中。
+
+教师的队列集合 \(q\) 与快层一级目标一致，包含各业务上行队列，以及所有未绑定和目标绑定的阶段—节点子队列。对每个代理时隙，先按与真实 EDF 相同的规则得到紧迫度常数 \(\omega_{q,t}\)，再执行无线、运输和计算代理服务 \(y_{q,t}(a)\)。虚拟队列严格递推为：
 
 \[
-J_{def}(a)=
-\underbrace{Q_{UL}^{eq}+\widehat A_{new}^{eq}
--\widehat B_{UL}^{eq,served}}_{\text{上行预测缺口}}
-+\sum_k
-\left[
-\widehat B_k^{eq,available}
--\sum_i\widehat B_{k,i}^{eq,served}(a)
-\right]_+.
+\xi_{q,t}^{eq}(a)=Q_{q,t}^{eq}(a)-y_{q,t}^{eq}(a),
+\qquad
+Q_{q,t+1}^{eq}(a)=\xi_{q,t}^{eq}(a)+A_{q,t+1}^{eq}(a),
 \]
 
-该缺口使用原始输入等效 bit，表示代理慢帧内未完成的阶段工作量，不等同于真实 SLA 违约。仅结构非法、生命周期预审失败或非有限计算才使计划无效。
+其中 \(A_{q,t+1}^{eq}\) 包括确定性预测新到达、上行/VNF 输出和有线在途到达；所有输出仍遵守至少下一时隙可用的因果规则。预测新到达按业务类别生成具有该类 SLA 截止时间的确定性代理批次，因此可参与同一 EDF 权重计算。共享预测缺口定义为：
+
+\[
+J_{def}(a)=\sum_{t\in T}\sum_q
+\omega_{q,t}\xi_{q,t}^{eq}(a),
+\qquad
+\omega_{q,t}=\frac{\Delta t}{\max(s_{q,t},\Delta t)}.
+\]
+
+这里同一积压若持续多个时隙，会在每个时隙有意重复贡献缺口，用来惩罚持续等待并提高临近截止队列的优先级；这不是程序重复计数。\(J_{def}\) 使用原始输入等效 bit×无量纲紧迫度，仍不是实际 SLA 违约。仅结构非法、生命周期预审失败或非有限计算才使计划无效。
 
 节点 CPU 和内存代理利用率为：
 
@@ -1194,12 +1208,45 @@ J_{balance}(a)=
 =\sum_{t\in T}m^{active}_{k,i,t}\Delta t,
 \]
 
+教师成本代理不固定使用最高频率。对 \(\widehat W_{k,i,t}>0\)，先忽略节点共享核心时间约束，最小化：
+
 \[
-\widehat\tau_{k,i,t}=\begin{cases}
-0,&\widehat W_{k,i,t}=0,\\
-\widehat W_{k,i,t}/F_{k,i}^{inst,max},&\widehat W_{k,i,t}>0,
-\end{cases}
+\pi_i^{CPU}\tau
++\pi^{energy}\kappa_i
+\frac{\widehat W_{k,i,t}^3}{\tau^2}.
 \]
+
+其无约束驻点为
+\(\widehat W_{k,i,t}(2\pi^{energy}\kappa_i/\pi_i^{CPU})^{1/3}\)。加入单实例频率下界和温实例可用时间上界后：
+
+\[
+\widehat\tau_{k,i,t}(0)=
+clip\left(
+\widehat W_{k,i,t}
+\left(\frac{2\pi^{energy}\kappa_i}{\pi_i^{CPU}}\right)^{1/3},
+\frac{\widehat W_{k,i,t}}{F_{k,i}^{inst,max}},
+m^{warm}_{k,i,t}\Delta t
+\right),
+\]
+
+且 \(\widehat W_{k,i,t}=0\) 时定义 \(\widehat\tau_{k,i,t}=0\)。注意比例必须是 \(2\pi^{energy}\kappa_i/\pi_i^{CPU}\)；写成倒数不满足一阶最优条件。
+
+若同节点 \(\sum_k\widehat\tau_{k,i,t}(0)\le m_i^{core}\Delta t\)，直接采用该解。否则引入唯一节点乘子 \(\lambda_{i,t}>0\)：
+
+\[
+\widehat\tau_{k,i,t}(\lambda)=
+clip\left(
+\widehat W_{k,i,t}
+\left(\frac{2\pi^{energy}\kappa_i}
+{\pi_i^{CPU}+\lambda}\right)^{1/3},
+\frac{\widehat W_{k,i,t}}{F_{k,i}^{inst,max}},
+m^{warm}_{k,i,t}\Delta t
+\right).
+\]
+
+按配置固定的乘子上界、迭代次数和容差执行确定性二分，选择满足
+\(\sum_k\widehat\tau_{k,i,t}(\lambda)\le m_i^{core}\Delta t\)
+的最小乘子。若所有任务的频率下界之和仍超过节点核心时间，则运输器按固定 VNF 优先级减少实际服务量，减少部分留在虚拟队列，并在后续各时隙通过 \(\omega_{q,t}\xi_{q,t}^{eq}\) 计入 \(J_{def}\)，不能产生违反共享核心时间的教师成本。
 
 \[
 \widehat E^{comp}_{k,i,t}=\begin{cases}
@@ -1208,7 +1255,7 @@ J_{balance}(a)=
 \end{cases}
 \]
 
-其中 \(\widehat W_{k,i,t}\) 是轻量时隙扫描在时隙 \(t\) 实际分配的 CPU 周期。运输器逐时隙强制 \(\widehat\tau_{k,i,t}\le m^{warm}_{k,i,t}\Delta t\) 以及节点聚合核心时间/CPU 周期上限；超出部分进入 \(J_{def}\)，不再把预测过载变成正无穷。非有限值或生命周期预演不变量破坏才返回 `TEACHER_INTERNAL_FAILURE`。
+其中 \(\widehat W_{k,i,t}\) 是轻量时隙扫描在时隙 \(t\) 实际分配的 CPU 周期。上述解严格对应教师代理中的 CPU 占用费与 DVFS 能耗费，并逐时隙满足温实例时间、单实例频率、节点核心时间和节点总周期约束；它不是固定最高频率的近似。超出容量的工作量继续留在相应虚拟队列，由统一逐时隙残余公式计入 \(J_{def}\)，不再把预测过载变成正无穷。非有限值、乘子求解不收敛或生命周期预演不变量破坏返回 `TEACHER_INTERNAL_FAILURE`。
 
 计划相关成本为：
 
@@ -1228,20 +1275,21 @@ J_{cost}(a)=
 \end{aligned}
 \]
 
-其中 `preview.n_created` 是生命周期只读预演实际生成的新实例数，保证优先复用现有实例且不重复收取部署/冷启动费。\(\widehat C^{wired}=\sum_k\widehat C_k^{wired}\) 来自上述逐阶段运输，\(\widehat C^{cloud}\) 按分配到云的物理 bit 和 CPU 周期使用配置云价格计算。\(\widehat C^{UL}\) 使用预测上行量、当前 \(h_t\)、全上行带宽 \(B^{UL}\) 和时长 \(H\) 反解满足香农约束的最小平均功率：
+其中 `preview.n_created` 是生命周期只读预演实际生成的新实例数，保证优先复用现有实例且不重复收取部署/冷启动费。\(\widehat C^{wired}=\sum_k\widehat C_k^{wired}\) 来自上述逐阶段运输，\(\widehat C^{cloud}\) 按分配到云的物理 bit 和 CPU 周期使用配置云价格计算。无线代理按每个虚拟时隙已服务上传量 \(\widehat B_{UL,t}^{eq,served}\)、当前可观测信道 \(h_t\) 和全上行带宽 \(B_t^{UL}\) 反解该时隙所需平均功率：
 
 \[
-\widehat p^{UL}=\begin{cases}
-0,&\widehat B_{UL}^{eq,served}=0,\\
-\dfrac{N_0B^{UL}}{h_t}
-\left(2^{\widehat B_{UL}^{eq,served}/(HB^{UL})}-1\right),
-&\widehat B_{UL}^{eq,served}>0,
+\widehat p_t^{UL}=\begin{cases}
+0,&\widehat B_{UL,t}^{eq,served}=0,\\
+\dfrac{N_0B_t^{UL}}{h_t}
+\left(2^{\widehat B_{UL,t}^{eq,served}/(\Delta t B_t^{UL})}-1\right),
+&\widehat B_{UL,t}^{eq,served}>0,
 \end{cases}
 \qquad
-\widehat C^{UL}=\pi^{energy}H\widehat p^{UL}.
+\widehat C^{UL}=\pi^{energy}\Delta t
+\sum_{t\in T}\widehat p_t^{UL}.
 \]
 
-无线代理先计算慢帧可上传量 \(\widehat B_{UL}^{eq,served}\)：当 \(h_t\le0\) 时为零，否则由 \(B^{UL}\)、\(P^{max}\) 和 \(H\) 的香农上界截断。只有该已上传量进入 VNF 1 的入口源；未上传的 \(Q_{UL}^{eq}+\widehat A_{new}^{eq}-\widehat B_{UL}^{eq,served}\) 进入 \(J_{def}\)。\(\widehat p^{UL}\) 只反解已服务上传量所需的有限功率并截断于 \(P^{max}\)，因此容量不足或零信道不会使所有教师计划变成正无穷。该无线项对同一状态中的部署计划是共同量，但保留在完整成本报告中。
+当 \(h_t\le0\) 或 \(B_t^{UL}=0\) 时，该时隙服务量和功率均定义为零，不计算除法；否则服务量由 \(P_t^{max}\) 和 \(\Delta t\) 的香农上界截断。首版没有未来信道信息，因此整个代理帧使用慢层边界当前观测 \(h_T\) 的零阶保持值，并在教师规格中明确这一因果近似。只有已经上传的量在下一代理时隙进入 VNF 1；未上传量继续留在各业务上行虚拟队列，并通过统一的 \(\omega_{q,t}\xi_{q,t}^{eq}\) 进入 \(J_{def}\)。\(\widehat p_t^{UL}\) 只反解已服务上传量所需的有限功率并满足 \(P_t^{max}\)，因此容量不足或零信道不会使所有教师计划变成正无穷。该无线项对同一状态中的部署计划是共同量，但保留在完整成本报告中。
 
 这里不运行未来仿真，也不读取未来实际轨迹。代理评估时点固定为当前慢帧边界。所有公式、源/目标排序、价格版本、\(H\)、\(d_{scale}\) 和 EWMA 参数均写入教师数据规格。
 
@@ -1399,6 +1447,7 @@ policy_learning_rate: 1.0e-4
 value_learning_rate: 3.0e-4
 ppo_update_epochs: 10
 ppo_minibatch_size: 64
+rollout_length_slow_frames: 16
 gradient_clip_norm: 5.0
 denoising_steps: 20
 fine_tuned_denoising_steps: 5
@@ -1445,11 +1494,13 @@ GAE 先在完整、已经事务提交的环境 rollout 上按 \(\gamma=0.99\)、
 
 ### 9.10 事务式 PPO 轨迹
 
-一个回合或尚未更新的 rollout 先进入暂存缓冲区。只有整段无内部失败时才提交到正式 PPO 缓冲区。
+事务单位唯一固定为配置中的 `rollout_length_slow_frames` 个慢帧转移；调试配置为 16。当前段先写入暂存缓冲区，收满规定长度且整段无内部失败后，才原子提交到正式 PPO 缓冲区并立即用于一次 PPO update。正式缓冲区不保留“已经提交但尚未归属某次 update”的悬空段。
+
+自然回合结束不等于事务边界：暂存段可以跨越一次无内部失败的环境重置继续采集，必须保存 `done` 掩码，使 GAE 不跨终止状态传播；只有累计到固定慢帧数才提交。训练预算结束时不足一个完整段的正常尾部直接丢弃并记录 `discarded_clean_tail_frames`，不执行短 rollout 更新。
 
 内部失败时：
 
-- 丢弃自上次成功更新后尚未使用的暂存转移；
+- 只丢弃当前尚未提交的 rollout 段；已经提交并完成的历史 update 不受影响；
 - 不回滚已经完成的历史 PPO 更新；
 - 当前回合立即截断并重置环境；
 - 保存失败状态、版本、扩散链和求解器诊断；
@@ -1552,8 +1603,11 @@ checkpoint_status
 - 教师不读取未来信息，轨迹和状态组不跨数据集；
 - 三教师去重、反向编码、重新解码和生命周期预审一致；
 - 教师容量按生命周期预演的温实例—秒计算，并包含冷启动、现有启动中实例和锁定超额温实例；
+- 两类不同截止时间业务共享同一 SFC 阶段资源参数，聚合服务量由 EDF 按批次截止时间正确分配；
 - 现有阶段队列、阶段在途、上行积压、新到达和上一阶段输出不重复计数；
+- 手算多时隙虚拟队列验证 \(J_{def}=\sum_{t,q}\omega_{q,t}\xi_{q,t}^{eq}\)，持续积压按设计逐时隙重复计入；
 - 高负载或零信道产生有限 \(J_{def}\)，三教师仍按服务优先词典序生成标签；
+- 教师 CPU 时间满足修正后的驻点公式；共享核心时间紧张时确定性乘子解满足约束且成本不高于固定最高频率可行解；
 - 教师轨迹从固定空实例/空队列初态出发，并由确定性三教师混合行为推进；
 - 辅助头不能读取动作或扩散噪声；
 - 只有保留时间辅助损失使用有效掩码；
@@ -1566,6 +1620,8 @@ checkpoint_status
 - 排空期继续处理已违约批次并报告截断；
 - 排空期统一补齐到慢帧边界，不生成部分慢转移；
 - 零保留档合法且进入 `ActionSpec` 哈希；目标失效或失去最后一个健康温实例时按固定事件顺序清除路由绑定；
+- 在途目标失效时原 `InTransitRecord` 字节不变，仅在到达提交生成解绑片段；
+- PPO update 只消费长度严格等于 `rollout_length_slow_frames` 的已提交段，内部失败只丢弃当前暂存段；
 - 规格不一致检查点明确拒绝；
 - 最小 GPU DPPO 与 CPU CLARABEL 联合流程跑通。
 
