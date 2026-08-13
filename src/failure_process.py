@@ -28,7 +28,7 @@ failure_process.py
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import math
 import random
@@ -101,6 +101,9 @@ class FailureSnapshot:
     # 注意，这里还没有结合所属故障域状态。
     node_local_up: dict[int, bool]
 
+    # 域状态与节点局部状态合成后的唯一运行可用性真值。
+    effective_node_up: dict[int, bool] = field(default_factory=dict)
+
     # 快照版本在同一故障过程内单调递增；脚本过程直接使用时隙号。
     version: int = 0
 
@@ -117,6 +120,10 @@ class FailureSnapshot:
         判断某个计算节点最终是否可以工作。
         """
 
+        if node_id in self.effective_node_up:
+            return self.effective_node_up[node_id]
+
+        # 仅为仍在迁移的手工测试快照保留推导；正式过程总是写入有效状态。
         # 中心云没有轨道位置，不能通过 get_site 查询；
         # get_node 同时支持轨旁 MEC 和中心云。
         node = topology.get_node(node_id)
@@ -376,6 +383,7 @@ class ScriptedFailureProcess(FailureProcess):
             time_slot=time_slot,
             domain_up=domain_up,
             node_local_up=node_local_up,
+            effective_node_up=effective_up,
             version=time_slot,
             newly_unavailable_node_ids=newly_unavailable,
             newly_available_node_ids=newly_available,
@@ -609,6 +617,7 @@ class MarkovFailureProcess(FailureProcess):
             node_local_up=dict(
                 self._node_local_up
             ),
+            effective_node_up=dict(effective_up),
             version=time_slot,
             newly_unavailable_node_ids=newly_unavailable,
             newly_available_node_ids=newly_available,
