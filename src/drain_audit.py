@@ -70,13 +70,17 @@ def build_drain_report(
     violated = 0
     censored: list[CensoredBatch] = []
     for batch in batches:
-        if batch.violation_recorded:
-            violated += 1
+        batch_violated = batch.violation_recorded
+        current_time = current_slot * slot_seconds
         if batch.completion_slot is not None:
             completion_time = batch.completion_slot * slot_seconds
             if completion_time <= batch.absolute_deadline_time:
                 on_time += 1
+            else:
+                batch_violated = True
         else:
+            if current_time > batch.absolute_deadline_time:
+                batch_violated = True
             censored.append(
                 CensoredBatch(
                     batch.batch_id,
@@ -85,9 +89,11 @@ def build_drain_report(
                         batch.total_input_equivalent_bits
                         - batch.completed_input_equivalent_bits,
                     ),
-                    batch.violation_recorded,
+                    batch_violated,
                 )
             )
+        if batch_violated:
+            violated += 1
     arrived = len(batches)
     resolved = on_time + violated
     return DrainReport(

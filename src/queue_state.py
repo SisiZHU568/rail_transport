@@ -96,6 +96,10 @@ class InTransitRecord:
             raise ValueError("在途节点和链路 ID 不能为负。")
         if self.departure_slot < 0 or self.arrival_slot <= self.departure_slot:
             raise ValueError("arrival_slot 必须严格晚于 departure_slot。")
+        if self.fragment.location != self.destination_node_id:
+            raise ValueError("在途片段 location 必须等于 destination 节点。")
+        if self.fragment.available_slot != self.arrival_slot:
+            raise ValueError("在途片段 available_slot 必须等于 arrival_slot。")
         _positive_finite(self.input_equivalent_bits, "input_equivalent_bits")
         if not math.isclose(
             self.input_equivalent_bits,

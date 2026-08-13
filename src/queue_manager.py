@@ -141,6 +141,8 @@ class QueueStateManager:
         slot_seconds: float,
         initial_batches: tuple[BatchRecord, ...] = (),
         initial_stage_fragments: tuple[QueueFragment, ...] = (),
+        initial_in_transit: tuple[InTransitRecord, ...] = (),
+        initial_completion_events: tuple[CompletionEvent, ...] = (),
     ) -> None:
         if not math.isfinite(slot_seconds) or slot_seconds <= 0.0:
             raise ValueError("slot_seconds 必须是正有限数。")
@@ -151,8 +153,8 @@ class QueueStateManager:
         self._batches = list(initial_batches)
         self._uplink_fragments: list[QueueFragment] = []
         self._stage_fragments = list(initial_stage_fragments)
-        self._in_transit: list[InTransitRecord] = []
-        self._completion_events: list[CompletionEvent] = []
+        self._in_transit = list(initial_in_transit)
+        self._completion_events = list(initial_completion_events)
 
     def snapshot(self) -> QueueSnapshot:
         return QueueSnapshot(
@@ -210,37 +212,47 @@ class QueueStateManager:
 
         if current_slot < self._current_slot:
             raise ValueError("队列时钟不能倒退。")
+        # 先在局部变量完成全部审计；任何事件守恒错误都不能污染真实状态。
         due_transit = [
             item for item in self._in_transit if item.arrival_slot <= current_slot
         ]
-        self._in_transit = [
+        remaining_transit = [
             item for item in self._in_transit if item.arrival_slot > current_slot
         ]
-        self._stage_fragments.extend(item.fragment for item in due_transit)
+        next_stage_fragments = [
+            *self._stage_fragments,
+            *(item.fragment for item in due_transit),
+        ]
 
         due_completion = [
             item
             for item in self._completion_events
             if item.completion_slot <= current_slot
         ]
-        self._completion_events = [
+        remaining_completion = [
             item
             for item in self._completion_events
             if item.completion_slot > current_slot
         ]
         completed_by_batch: dict[str, float] = {}
+        completion_slot_by_batch: dict[str, int] = {}
         for event in due_completion:
             completed_by_batch[event.batch_id] = (
                 completed_by_batch.get(event.batch_id, 0.0)
                 + event.input_equivalent_bits
             )
+            completion_slot_by_batch[event.batch_id] = max(
+                completion_slot_by_batch.get(event.batch_id, 0),
+                event.completion_slot,
+            )
         updated_batches: list[BatchRecord] = []
         for batch in self._batches:
-            completed = min(
-                batch.total_input_equivalent_bits,
+            completed = (
                 batch.completed_input_equivalent_bits
-                + completed_by_batch.get(batch.batch_id, 0.0),
+                + completed_by_batch.get(batch.batch_id, 0.0)
             )
+            if completed > batch.total_input_equivalent_bits + 1e-9:
+                raise ValueError("completion flow 超过批次原始输入等效量。")
             completion_slot = batch.completion_slot
             if math.isclose(
                 completed,
@@ -248,7 +260,11 @@ class QueueStateManager:
                 rel_tol=1e-12,
                 abs_tol=1e-9,
             ):
-                completion_slot = current_slot
+                completed = batch.total_input_equivalent_bits
+                completion_slot = completion_slot_by_batch.get(
+                    batch.batch_id,
+                    completion_slot,
+                )
             updated_batches.append(
                 replace(
                     batch,
@@ -256,6 +272,14 @@ class QueueStateManager:
                     completion_slot=completion_slot,
                 )
             )
+        unknown_completion_ids = set(completed_by_batch) - {
+            batch.batch_id for batch in self._batches
+        }
+        if unknown_completion_ids:
+            raise ValueError("completion flow 引用了未知批次。")
+        self._in_transit = remaining_transit
+        self._stage_fragments = next_stage_fragments
+        self._completion_events = remaining_completion
         self._batches = updated_batches
         if current_slot != self._current_slot or due_transit or due_completion:
             self._version += 1
@@ -264,6 +288,26 @@ class QueueStateManager:
 
     def _reject(self, code: str) -> QueueCommitResult:
         return QueueCommitResult(False, code, self.snapshot())
+
+    def clear_invalid_routing_targets(
+        self,
+        valid_targets: set[tuple[int, int]],
+    ) -> QueueSnapshot:
+        """仅解绑已经到达的队列片段；不可变在途记录保持原样。"""
+
+        updated: list[QueueFragment] = []
+        changed = False
+        for fragment in self._stage_fragments:
+            target = fragment.routing_target_node
+            if target is not None and (fragment.stage_id, target) not in valid_targets:
+                updated.append(replace(fragment, routing_target_node=None))
+                changed = True
+            else:
+                updated.append(fragment)
+        if changed:
+            self._stage_fragments = updated
+            self._version += 1
+        return self.snapshot()
 
     def audit_deadlines(self) -> SLAReport:
         """严格超过截止时间才记一次违约，已违约批次仍可继续完成。"""
@@ -288,6 +332,8 @@ class QueueStateManager:
                     on_time_completed += 1
                 else:
                     late_completed += 1
+                    if not violated:
+                        new_violations += 1
                     violated = True
             updated.append(replace(batch, violation_recorded=violated))
         if updated != self._batches:

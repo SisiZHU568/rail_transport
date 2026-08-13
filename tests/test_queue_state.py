@@ -38,10 +38,20 @@ def test_fragment_validates_stage_and_equivalent_amount() -> None:
 
 
 def test_in_transit_record_requires_exact_fragment_amount() -> None:
-    fragment = QueueFragment("f", "b", 0, 1, 0, 2, 4.0, 3)
+    fragment = QueueFragment("f", "b", 0, 1, 1, 2, 4.0, 4)
 
     with pytest.raises(ValueError, match="equivalent"):
         InTransitRecord("t", fragment, 0, 1, 7, 3, 4, 3.9)
+
+
+def test_in_transit_fragment_matches_destination_and_arrival() -> None:
+    wrong_destination = QueueFragment("f1", "b", 0, 1, 0, 2, 4.0, 4)
+    wrong_arrival = QueueFragment("f2", "b", 0, 1, 1, 2, 4.0, 5)
+
+    with pytest.raises(ValueError, match="destination"):
+        InTransitRecord("t1", wrong_destination, 0, 1, 7, 3, 4, 4.0)
+    with pytest.raises(ValueError, match="arrival"):
+        InTransitRecord("t2", wrong_arrival, 0, 1, 7, 3, 4, 4.0)
 
 
 def test_snapshot_and_nested_records_are_immutable() -> None:

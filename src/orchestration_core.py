@@ -10,6 +10,14 @@ from src.instance_lifecycle import (
     LifecycleDeploymentPlan,
     LifecycleSnapshot,
 )
+from src.queue_manager import (
+    FastAllocationPlan,
+    QueueCommitContext,
+    QueueCommitResult,
+    QueueStateManager,
+    SLAReport,
+)
+from src.queue_state import QueueSnapshot
 
 
 @dataclass(frozen=True)
@@ -113,3 +121,91 @@ class PhaseASlotCoordinator:
         self.cost_ledger.append_all(running)
         self._costing_finalized = True
         return running
+
+
+@dataclass(frozen=True)
+class PhaseBSlotResult:
+    """完成边界事件、故障更新和解绑后的统一只读结果。"""
+
+    failure_snapshot: FailureSnapshot
+    lifecycle_snapshot: LifecycleSnapshot
+    queue_snapshot: QueueSnapshot
+    sla_report: SLAReport
+    network_version: int
+
+
+class PhaseBSlotCoordinator:
+    """固定阶段 B 的调用顺序，但不复制任何模块的运行状态。"""
+
+    def __init__(
+        self,
+        phase_a: PhaseASlotCoordinator,
+        queue_manager: QueueStateManager,
+    ) -> None:
+        self.phase_a = phase_a
+        self.queue_manager = queue_manager
+        self.failure_snapshot: FailureSnapshot | None = None
+        self.lifecycle_snapshot: LifecycleSnapshot | None = None
+        self.network_version: int | None = None
+
+    def begin_slot(
+        self,
+        current_slot: int,
+        *,
+        network_version: int,
+    ) -> PhaseBSlotResult:
+        """先提交到达/完成事件，再更新实例、故障、路由绑定和 SLA。"""
+
+        self.queue_manager.begin_slot(current_slot)
+        phase_a_result = self.phase_a.begin_slot(current_slot)
+        self.failure_snapshot = phase_a_result.failure_snapshot
+        self.lifecycle_snapshot = phase_a_result.lifecycle_snapshot
+        self.network_version = network_version
+        valid_targets = {
+            (batch.function_id, batch.node_id)
+            for batch in self.lifecycle_snapshot.batches
+            if batch.status.value == "warm"
+            and self.failure_snapshot.effective_node_up.get(batch.node_id, False)
+        }
+        queue_snapshot = self.queue_manager.clear_invalid_routing_targets(
+            valid_targets
+        )
+        sla_report = self.queue_manager.audit_deadlines()
+        queue_snapshot = self.queue_manager.snapshot()
+        return PhaseBSlotResult(
+            self.failure_snapshot,
+            self.lifecycle_snapshot,
+            queue_snapshot,
+            sla_report,
+            network_version,
+        )
+
+    def commit_allocation(
+        self,
+        plan: FastAllocationPlan,
+    ) -> QueueCommitResult:
+        """由提交端使用当前四版本审计计划，求解器本身无需访问环境。"""
+
+        if (
+            self.failure_snapshot is None
+            or self.lifecycle_snapshot is None
+            or self.network_version is None
+        ):
+            raise RuntimeError("必须先调用 begin_slot()。")
+        warm_counts: dict[tuple[int, int], int] = {}
+        for batch in self.lifecycle_snapshot.batches:
+            if batch.status.value != "warm":
+                continue
+            key = (batch.function_id, batch.node_id)
+            warm_counts[key] = warm_counts.get(key, 0) + batch.count
+        queue_snapshot = self.queue_manager.snapshot()
+        context = QueueCommitContext(
+            queue_version=queue_snapshot.version,
+            lifecycle_version=self.lifecycle_snapshot.version,
+            failure_version=self.failure_snapshot.version,
+            network_version=self.network_version,
+            current_slot=queue_snapshot.current_slot,
+            effective_node_up=self.failure_snapshot.effective_node_up,
+            warm_instance_counts=warm_counts,
+        )
+        return self.queue_manager.commit_allocation(plan, context)

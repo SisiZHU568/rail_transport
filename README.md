@@ -9,12 +9,18 @@
 
 ### 当前重构进度
 
-阶段 A 已建立配置驱动的部署边界、精确 CTMC 故障快照、实例批次生命周期和实例成本账本。车载终端只保留请求产生、位置与通信语义，不再是 VNF 计算候选。阶段 B–E 尚未接入新主链路；在后续阶段完成前，不应把旧快层结果作为最终论文主模型结果。
+阶段 A 已建立配置驱动的部署边界、精确 CTMC 故障快照、实例批次生命周期和实例成本账本。阶段 B 已建立跨时隙队列、不可变在途与完成事件、确定性 EDF 以及批次级 SLA/排空审计。车载终端只保留请求产生、位置与通信语义，不再是 VNF 计算候选。阶段 C–E 尚未接入新主链路；在后续阶段完成前，不应把旧快层结果作为最终论文主模型结果。
 
 阶段 A 核心检查使用已创建的 `rail-dppo-gpu` 环境：
 
 ```powershell
 D:\Anaconda3\envs\rail-dppo-gpu\python.exe -m pytest tests/test_orchestration_config.py tests/test_failure_process.py tests/test_instance_lifecycle.py tests/test_cost_ledger.py tests/test_phase_a_orchestration.py -q
+```
+
+阶段 B 核心检查：
+
+```powershell
+D:\Anaconda3\envs\rail-dppo-gpu\python.exe -m pytest tests/test_queue_state.py tests/test_queue_manager.py tests/test_sla_drain.py tests/test_phase_b_orchestration.py -q
 ```
 
 接口约定如下：
