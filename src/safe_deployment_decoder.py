@@ -1,6 +1,6 @@
 """配置驱动的 DPPO 动作规格和确定性全局可完成部署解码。"""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 import math
@@ -61,6 +61,11 @@ class DecoderInput:
     effective_node_up: Mapping[int, bool]
     locked_instance_counts: Mapping[tuple[int, int], int]
     required_replica_nodes: Mapping[int, int]
+    fault_domain_by_node: Mapping[int, int] = field(default_factory=dict)
+    minimum_fault_domains: Mapping[int, int] = field(default_factory=dict)
+    domain_availability: Mapping[int, float] = field(default_factory=dict)
+    node_conditional_availability: Mapping[int, float] = field(default_factory=dict)
+    maximum_vnf_unavailability: Mapping[int, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -71,11 +76,24 @@ class DecoderInput:
             "locked_instance_counts",
             MappingProxyType(dict(self.locked_instance_counts)),
         )
-        object.__setattr__(
-            self,
+        for field_name in (
             "required_replica_nodes",
-            MappingProxyType(dict(self.required_replica_nodes)),
+            "fault_domain_by_node",
+            "minimum_fault_domains",
+            "domain_availability",
+            "node_conditional_availability",
+            "maximum_vnf_unavailability",
+        ):
+            object.__setattr__(
+                self, field_name, MappingProxyType(dict(getattr(self, field_name)))
+            )
+        availability_values = (
+            *self.domain_availability.values(),
+            *self.node_conditional_availability.values(),
+            *self.maximum_vnf_unavailability.values(),
         )
+        if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in availability_values):
+            raise ValueError("可靠性概率必须位于 [0, 1]。")
 
 
 @dataclass(frozen=True)
@@ -170,7 +188,68 @@ class SafeDeploymentDecoder:
                 function_id, 1
             ):
                 return False
+            selected_domains = {
+                decoder_input.fault_domain_by_node.get(node_id, node_id)
+                for (candidate_function, node_id), value in assignments.items()
+                if candidate_function == function_id and value > 0
+            }
+            possible_domains = {
+                decoder_input.fault_domain_by_node.get(node_id, node_id)
+                for node_id in possible_nodes
+            }
+            if len(selected_domains | possible_domains) < decoder_input.minimum_fault_domains.get(
+                function_id, 1
+            ):
+                return False
+            # 当前 VNF 的全部位置已确定时立即检查可靠性，避免枚举后续 VNF 后才剪枝。
+            if not any(pair[0] == function_id for pair in remaining_pairs):
+                if not self._function_is_safe(function_id, assignments, decoder_input):
+                    return False
+        if next_index == len(self.action_spec.pairs):
+            return self._complete_is_safe(assignments, decoder_input)
         return True
+
+    @staticmethod
+    def _function_is_safe(
+        function_id: int,
+        assignments: Mapping[tuple[int, int], int],
+        decoder_input: DecoderInput,
+    ) -> bool:
+        nodes = [
+            node_id
+            for (candidate_function, node_id), count in assignments.items()
+            if candidate_function == function_id and count > 0
+        ]
+        domains: dict[int, list[int]] = {}
+        for node_id in nodes:
+            domain_id = decoder_input.fault_domain_by_node.get(node_id, node_id)
+            domains.setdefault(domain_id, []).append(node_id)
+        if len(domains) < decoder_input.minimum_fault_domains.get(function_id, 1):
+            return False
+        unavailable = 1.0
+        for domain_id, domain_nodes in domains.items():
+            domain_up = decoder_input.domain_availability.get(domain_id, 1.0)
+            all_nodes_down = math.prod(
+                1.0 - decoder_input.node_conditional_availability.get(node_id, 1.0)
+                for node_id in domain_nodes
+            )
+            unavailable *= (1.0 - domain_up) + domain_up * all_nodes_down
+        return unavailable <= decoder_input.maximum_vnf_unavailability.get(
+            function_id, 1.0
+        ) + 1e-12
+
+    def _complete_is_safe(
+        self,
+        assignments: Mapping[tuple[int, int], int],
+        decoder_input: DecoderInput,
+    ) -> bool:
+        """按故障域并集界充分条件检查最终目标部署。"""
+
+        functions = sorted({function_id for function_id, _ in self.action_spec.pairs})
+        return all(
+            self._function_is_safe(function_id, assignments, decoder_input)
+            for function_id in functions
+        )
 
     def _complete(
         self,

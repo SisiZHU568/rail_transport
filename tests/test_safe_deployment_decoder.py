@@ -91,3 +91,54 @@ def test_zero_target_marks_only_retention_dimension_ineffective() -> None:
     for pair_index, pair in enumerate(spec.pairs):
         if result.plan.instance_counts[pair] == 0:
             assert result.effective_action_mask[2 * pair_index + 1] is False
+
+
+def test_decoder_enforces_fault_domain_dispersion() -> None:
+    config = load_phase_a_config(load_config("configs/debug.yaml"))
+    spec = ActionSpec.from_phase_a_config(config)
+    result = SafeDeploymentDecoder(
+        config, spec, function_memory_mb={0: 256, 1: 512, 2: 768}
+    ).decode(
+        np.zeros(spec.action_dim),
+        DecoderInput(
+            effective_node_up={node_id: True for node_id in config.node_resources},
+            locked_instance_counts={},
+            required_replica_nodes={0: 2, 1: 1, 2: 1},
+            fault_domain_by_node={0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 3},
+            minimum_fault_domains={0: 2},
+        ),
+    )
+
+    assert result.code == "OK"
+    selected_domains = {
+        {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 3}[node_id]
+        for (function_id, node_id), count in result.plan.instance_counts.items()
+        if function_id == 0 and count > 0
+    }
+    assert len(selected_domains) >= 2
+
+
+def test_decoder_uses_union_bound_unavailability_budget() -> None:
+    config = load_phase_a_config(load_config("configs/debug.yaml"))
+    spec = ActionSpec.from_phase_a_config(config)
+    result = SafeDeploymentDecoder(
+        config, spec, function_memory_mb={0: 256, 1: 512, 2: 768}
+    ).decode(
+        np.zeros(spec.action_dim),
+        DecoderInput(
+            effective_node_up={node_id: True for node_id in config.node_resources},
+            locked_instance_counts={},
+            required_replica_nodes={0: 1, 1: 1, 2: 1},
+            fault_domain_by_node={node_id: node_id for node_id in config.node_resources},
+            domain_availability={node_id: 0.999 for node_id in config.node_resources},
+            node_conditional_availability={node_id: 0.99 for node_id in config.node_resources},
+            maximum_vnf_unavailability={0: 0.005},
+        ),
+    )
+
+    assert result.code == "OK"
+    assert sum(
+        count > 0
+        for (function_id, _), count in result.plan.instance_counts.items()
+        if function_id == 0
+    ) >= 2
