@@ -34,8 +34,9 @@ def _install_fast_boundaries(monkeypatch, *, fail_candidate: float | None = None
     dimensions = SimpleNamespace(
         state_dim=3,
         action_dim=2,
-        mec_count=1,
-        compute_node_count=2,
+        # 测试配置允许最多 3 个副本，因此假环境也必须提供至少 3 个计算节点。
+        mec_count=2,
+        compute_node_count=3,
         function_count=1,
     )
 
@@ -65,7 +66,8 @@ def _install_fast_boundaries(monkeypatch, *, fail_candidate: float | None = None
             if fail_candidate == candidate:
                 raise OverflowError("synthetic overflow")
             return {
-                "clip_fraction": 0.15,
+                # 与当前正式校准目标区间 [0.60, 0.85] 保持一致。
+                "clip_fraction": 0.70,
                 "approximate_kl": candidate + self.update_count / 1000.0,
                 "maximum_approximate_kl": candidate + self.update_count / 100.0,
                 "optimizer_step_count": 2.0,
