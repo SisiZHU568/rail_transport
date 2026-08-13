@@ -224,24 +224,22 @@ class ReliabilityTeacher(SimulationTeacher):
 
 
 class BalancedTeacher(SimulationTeacher):
-    """在最低副本数上增加一档，再按边缘成本排序的启发式教师。"""
+    """使用最低副本数和可靠性排序的跨故障域平衡教师。"""
 
     teacher_name = "balanced"
 
     def _replica_count(self) -> int:
-        """平衡教师采用低成本与高可靠之间的下一档副本数。"""
+        """使用配置下限，避免额外副本让教师动作失去原始可行性。"""
 
-        action_space = self.context.action_space
-        return min(
-            action_space.minimum_replicas + 1,
-            action_space.maximum_replicas,
-        )
+        return self.context.action_space.minimum_replicas
 
     def _rank_nodes(
         self,
         observations: tuple[DPPONodeObservation, ...],
     ) -> tuple[int, ...]:
-        ordered = sorted(observations, key=self._cost_key)
+        # 先按故障概率和可用率排序，再用现有逻辑分散到不同故障域。
+        # 这里不改变 CostTeacher 和 ReliabilityTeacher 的各自策略。
+        ordered = sorted(observations, key=self._reliability_key)
         return self._diverse_prefix(ordered, self._replica_count())
 
     def _retention_seconds(

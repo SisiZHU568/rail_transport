@@ -136,6 +136,14 @@ def validate_config(config: dict[str, Any]) -> None:
     if not math.isclose(sum(float(value) for value in fractions), 1.0):
         raise ValueError("数据集切分比例之和必须为 1。")
     _require_positive_integer(dataset, "episodes")
+    teacher_schema_version = dataset.get("teacher_schema_version")
+    if (
+        not isinstance(teacher_schema_version, str)
+        or not teacher_schema_version.strip()
+    ):
+        raise ValueError(
+            "dppo.dataset.teacher_schema_version 必须是非空字符串。"
+        )
     teacher_names = dataset.get("teacher_names")
     allowed_teachers = {"cost", "reliability", "balanced"}
     if (

@@ -32,6 +32,10 @@ def test_load_debug_config() -> None:
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
     assert config["dppo"]["pretraining"]["optimizer_steps"] == 200
     assert config["dppo"]["pretraining"]["validation_interval_steps"] == 10
+    assert (
+        config["dppo"]["dataset"]["teacher_schema_version"]
+        == "balanced-min-replica-reliability-v1"
+    )
     assert config["dppo"]["training"]["iterations"] > 0
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
@@ -158,6 +162,29 @@ def test_validate_config_requires_known_nonempty_dataset_teachers() -> None:
     config["dppo"]["dataset"]["teacher_names"] = ["unknown"]
 
     with pytest.raises(ValueError, match="teacher_names"):
+        validate_config(config)
+
+
+@pytest.mark.parametrize("invalid_value", ("", "   ", 1, None))
+def test_validate_config_requires_nonempty_teacher_schema_version(
+    invalid_value: object,
+) -> None:
+    """教师规则版本必须明确，避免新旧专家标签共享同一个配置哈希。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["dataset"]["teacher_schema_version"] = invalid_value
+
+    with pytest.raises(ValueError, match="teacher_schema_version"):
+        validate_config(config)
+
+
+def test_validate_config_requires_teacher_schema_version_field() -> None:
+    """缺少教师规则版本时必须立即拒绝，而不是生成无法追溯的数据。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["dppo"]["dataset"].pop("teacher_schema_version", None)
+
+    with pytest.raises(ValueError, match="teacher_schema_version"):
         validate_config(config)
 
 

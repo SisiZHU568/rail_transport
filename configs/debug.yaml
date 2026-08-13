@@ -576,6 +576,8 @@ dppo:
   dataset:
     episodes: 1000
     seed_start: 40000
+    # 教师规则变化会改变专家标签；版本进入配置哈希，防止混用新旧数据。
+    teacher_schema_version: balanced-min-replica-reliability-v1
     # 数据集划分只按 Episode seed 进行，固定随机种子保证划分可复现。
     split_seed: 41000
     # 一个 Episode 固定使用一种教师，Episode 之间按下列顺序循环。

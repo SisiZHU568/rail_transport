@@ -13,7 +13,7 @@ from src.dppo_teacher import build_simulation_teacher
 
 @pytest.mark.parametrize(
     ("teacher_name", "expected_replicas"),
-    [("cost", 2), ("reliability", 3), ("balanced", 3)],
+    [("cost", 2), ("reliability", 3), ("balanced", 2)],
 )
 def test_teacher_is_deterministic_and_uses_declared_replica_policy(
     teacher_name: str,
@@ -69,7 +69,7 @@ def test_cost_teacher_prefers_near_operational_edge_nodes() -> None:
 def test_reliable_teachers_put_distinct_fault_domains_in_replica_prefix(
     teacher_name: str,
 ) -> None:
-    """三副本教师的前三名必须来自三个不同故障域。"""
+    """可靠性排序教师的实际副本前缀必须来自不同故障域。"""
 
     scenario = build_dppo_scenario(load_config("configs/debug.yaml"))
     scenario.reset(seed=123)
@@ -89,8 +89,8 @@ def test_reliable_teachers_put_distinct_fault_domains_in_replica_prefix(
         assert len(selected_domains) == action.replica_count
 
 
-def test_balanced_teacher_uses_edge_cost_order_after_reliability() -> None:
-    """平衡教师先满足跨域约束，再用时延和云成本排列可选节点。"""
+def test_balanced_teacher_uses_reliability_order_with_diverse_domains() -> None:
+    """平衡教师按可靠性选节点，同时让实际副本来自不同故障域。"""
 
     scenario = build_dppo_scenario(load_config("configs/debug.yaml"))
     scenario.reset(seed=123)
@@ -98,11 +98,9 @@ def test_balanced_teacher_uses_edge_cost_order_after_reliability() -> None:
         scenario.current_public_snapshot()
     )
     first_ranking = proposal.decoded_action.function_actions[0].ranked_node_ids
-    cloud_id = scenario.execution_core.topology.cloud_node.node_id
-
-    # 默认场景有三个轨旁故障域，因而无需为了跨域而提前使用高成本中心云。
-    assert cloud_id not in first_ranking[:3]
-    assert first_ranking[:3] == (0, 2, 4)
+    # 默认场景中中心云的失效概率最低，因此可靠性排序应把它放在首位；
+    # 第二个副本来自轨旁节点 0，且与中心云属于不同故障域。
+    assert first_ranking[:2] == (5, 0)
 
 
 def test_hidden_future_requests_do_not_change_teacher_action() -> None:
@@ -138,7 +136,7 @@ def test_unknown_teacher_name_is_rejected() -> None:
 
 
 def test_teachers_derive_replica_count_from_configured_bounds() -> None:
-    """三类教师从同一配置区间派生低、中、高副本策略。"""
+    """成本与平衡教师使用配置下限，可靠性教师使用配置上限。"""
 
     config = load_config("configs/debug.yaml")
     config["dppo"]["action"]["minimum_replicas"] = 2
@@ -146,7 +144,7 @@ def test_teachers_derive_replica_count_from_configured_bounds() -> None:
     scenario = build_dppo_scenario(config)
     scenario.reset(seed=123)
     snapshot = scenario.current_public_snapshot()
-    expected_counts = {"cost": 2, "balanced": 3, "reliability": 5}
+    expected_counts = {"cost": 2, "balanced": 2, "reliability": 5}
 
     for teacher_name, expected_count in expected_counts.items():
         proposal = build_simulation_teacher(teacher_name, scenario).propose(snapshot)
