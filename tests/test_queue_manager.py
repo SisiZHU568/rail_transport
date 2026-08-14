@@ -352,3 +352,32 @@ def test_final_stage_tail_completes_batch_with_shared_tolerance() -> None:
     assert result.accepted
     assert completed.completed_input_equivalent_bits == 100.0
     assert completed.completion_slot == 1
+
+
+def test_numeric_tail_absorption_never_exceeds_group_tolerance() -> None:
+    manager = QueueStateManager(
+        StageFlowConfig((1.0,)),
+        slot_seconds=1.0,
+        flow_absolute_tolerance_bits=10.0,
+    )
+    for index in range(3):
+        manager.admit_batch(f"batch-{index}", 0, 0.0, 20.0 + index, 100.0)
+    operation = AllocationOperation(
+        QueueKey.uplink(0),
+        "uplink",
+        95.0,
+        destination_node_id=0,
+    )
+
+    result = manager.commit_allocation(
+        plan(manager, (operation, operation, operation)),
+        context(queue_version=manager.snapshot().version, current_slot=0),
+    )
+
+    assert result.accepted
+    assert sum(
+        item.input_equivalent_bits for item in result.snapshot.stage_fragments
+    ) == 295.0
+    assert sum(
+        item.input_equivalent_bits for item in result.snapshot.uplink_fragments
+    ) == 5.0

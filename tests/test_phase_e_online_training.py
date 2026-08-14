@@ -146,9 +146,14 @@ def test_formal_training_runs_two_updates_and_resumes_at_update_boundary(
         rows = list(csv.DictReader(handle))
     assert len(rows) == 2
     assert [int(row["completed_update_count"]) for row in rows] == [1, 2]
+    validation_rewards = [float(row["validation_reward"]) for row in rows]
+    assert np.isfinite(validation_rewards).all()
     payload = torch.load(last, map_location="cpu", weights_only=False)
     assert payload["metadata"]["next_frame_index"] == 32
     assert payload["metadata"]["completed_update_count"] == 2
+    assert payload["metadata"]["best_validation_reward"] == max(
+        validation_rewards
+    )
 
 
 def test_formal_training_audits_internal_failure_without_success_artifacts(

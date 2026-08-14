@@ -37,6 +37,7 @@ _HISTORY_FIELDS = (
     "mean_violation_rate",
     "mean_deficit_rate",
     "mean_raw_cost",
+    "validation_reward",
     "policy_loss",
     "value_loss",
     "maximum_approximate_kl",
@@ -103,6 +104,54 @@ def _validate_resume_history(path: Path, completed_update_count: int) -> None:
         rows = list(csv.DictReader(handle))
     if not rows or int(rows[-1]["completed_update_count"]) != completed_update_count:
         raise ValueError("恢复 checkpoint 与 training_history.csv 不一致。")
+
+
+def _validation_reward(
+    raw: dict,
+    trainer: PhaseEOnlineTrainer,
+    *,
+    completed_update_count: int,
+) -> float:
+    runtime = build_phase_e_runtime(raw, total_slow_frames=1)
+    settings = raw["phase_e_runtime"]
+    policy_seed = (
+        int(raw["dppo"]["stability"]["calibration_seed_start"])
+    )
+
+    def policy(context):
+        observation = runtime.observation_adapter.encode(context)
+        decision = trainer.sample_decision(
+            np.asarray(observation.values, dtype=np.float32),
+            seed=policy_seed,
+        )
+        return decision.scores
+
+    result = runtime.environment.run_slow_frame(
+        start_slot=0,
+        policy=policy,
+        arrivals_by_slot={
+            0: (
+                ArrivalBatch(
+                    f"validation-{completed_update_count}",
+                    0,
+                    float(settings["smoke_arrival_equivalent_bits"]),
+                    float(settings["smoke_deadline_seconds"]),
+                ),
+            )
+        },
+        network_for_slot=lambda slot: runtime.network_for_slot(
+            slot,
+            frame_index=0,
+        ),
+        training_mode=False,
+    )
+    if (
+        result.code != "OK"
+        or result.reward is None
+        or any(not item.fast_result.optimization.succeeded for item in result.slots)
+    ):
+        raise RuntimeError("Phase E 固定验证发生内部失败。")
+    return result.reward.reward
 
 
 def main(arguments: list[str] | None = None) -> None:
@@ -270,9 +319,14 @@ def main(arguments: list[str] | None = None) -> None:
         if metrics is None:
             raise RuntimeError("完整事务 rollout 未触发 PPO 更新。")
         mean_reward = float(np.mean([item.reward.reward for item in frame_results]))
-        improved = best_reward is None or mean_reward > best_reward
+        validation_reward = _validation_reward(
+            raw,
+            trainer,
+            completed_update_count=trainer.completed_update_count,
+        )
+        improved = best_reward is None or validation_reward > best_reward
         if improved:
-            best_reward = mean_reward
+            best_reward = validation_reward
         assert observation_spec_hash is not None
         metadata = PhaseEOnlineMetadata(
             "phase-e-online-v1",
@@ -295,6 +349,7 @@ def main(arguments: list[str] | None = None) -> None:
                 np.mean([item.reward.deficit_rate for item in frame_results])
             ),
             "mean_raw_cost": float(np.mean([item.raw_cost for item in frame_results])),
+            "validation_reward": validation_reward,
             "policy_loss": metrics["policy_loss"],
             "value_loss": metrics["value_loss"],
             "maximum_approximate_kl": metrics["maximum_approximate_kl"],
@@ -308,7 +363,8 @@ def main(arguments: list[str] | None = None) -> None:
             save_phase_e_online_checkpoint(best_path, trainer.agent, metadata)
         print(
             f"update={trainer.completed_update_count} frames={rollout_start}-{global_frame - 1} "
-            f"reward={mean_reward:.6f} max_kl={metrics['maximum_approximate_kl']:.6f}",
+            f"reward={mean_reward:.6f} validation={validation_reward:.6f} "
+            f"max_kl={metrics['maximum_approximate_kl']:.6f}",
             flush=True,
         )
 

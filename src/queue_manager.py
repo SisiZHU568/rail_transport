@@ -516,6 +516,7 @@ class QueueStateManager:
             fragments = self._matching_fragments(key)
             available = sum(item.input_equivalent_bits for item in fragments)
             tolerance = self._flow_tolerance(available)
+            absorbed_tail = 0.0
             if sum(quotas) > available + tolerance:
                 return self._reject("FLOW_EXCEEDS_AVAILABLE_QUEUE")
 
@@ -527,8 +528,13 @@ class QueueStateManager:
                         continue
                     amount = min(remaining, quotas[index])
                     tail = remaining - amount
-                    if amount > 0.0 and 0.0 < tail <= tolerance:
+                    if (
+                        amount > 0.0
+                        and 0.0 < tail
+                        and absorbed_tail + tail <= tolerance
+                    ):
                         amount = remaining
+                        absorbed_tail += tail
                     child_id = _stable_id(
                         "fragment",
                         fragment.fragment_id,
@@ -609,7 +615,7 @@ class QueueStateManager:
                     quotas[index] -= amount
                 if consumed > 0.0:
                     consumed_ids.add(fragment.fragment_id)
-                    if remaining > tolerance:
+                    if remaining > 0.0:
                         residuals.append(
                             replace(fragment, input_equivalent_bits=remaining)
                         )
