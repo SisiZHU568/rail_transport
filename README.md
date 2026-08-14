@@ -9,7 +9,7 @@
 
 ### 当前重构进度
 
-阶段 A 已建立配置驱动的部署边界、精确 CTMC 故障快照、实例批次生命周期和实例成本账本。阶段 B 已建立跨时隙队列、不可变在途与完成事件、确定性 EDF 以及批次级 SLA/排空审计。车载终端只保留请求产生、位置与通信语义，不再是 VNF 计算候选。阶段 C–E 尚未接入新主链路；在后续阶段完成前，不应把旧快层结果作为最终论文主模型结果。
+阶段 A 已建立配置驱动的部署边界、精确 CTMC 故障快照、实例批次生命周期和实例成本账本。阶段 B 已建立跨时隙队列、不可变在途与完成事件、确定性 EDF 以及批次级 SLA/排空审计。阶段 C 使用两阶段 CLARABEL 连续凸优化联合分配无线、计算和有线商品流。阶段 D–E 已把配置驱动的观察/动作规格、安全部署解码、真实双时间尺度环境和事务式在线 PPO 更新接入主链。
 
 阶段 A 核心检查使用已创建的 `rail-dppo-gpu` 环境：
 
@@ -37,39 +37,44 @@ MuJoCo、IsaacGym、WandB 或机器人任务依赖。
 运行官方核心和轨道训练闭环的精简测试：
 
 ```powershell
-python -m pytest tests/test_dppo_official_core.py tests/test_dppo.py tests/test_config.py tests/test_dppo_training.py -q
+python -m pytest tests/test_dppo_official_core.py tests/test_dppo.py tests/test_phase_e_environment.py tests/test_phase_e_online_trainer.py -q
 ```
 
 ### 最小完整训练闭环
 
-下面的命令只用于验证整条链路，不代表论文正式训练规模：
+正式在线训练只接受 `phase-e-pretrained-v1` checkpoint 和带观察/动作规格哈希的 Phase E 教师数据。旧 `dppo-checkpoint-v1`、`dppo-online-checkpoint-v2` 及旧字段数据集不会自动迁移。
+
+使用通过安全解码复验的教师数据进行预训练：
 
 ```powershell
-python run_dppo_dataset_generation.py --config configs/debug.yaml --episodes 6 --seed-start 41000 --output-root results/dppo/smoke/dataset
-
-python run_dppo_pretraining.py --config configs/debug.yaml --dataset-root results/dppo/smoke/dataset --output-root results/dppo/smoke/pretraining --epochs 2 --device cpu
-
-python run_dppo_stability_calibration.py --config configs/debug.yaml --pretrained-checkpoint results/dppo/smoke/pretraining/dppo_pretrained.pt --output-root results/dppo/smoke/calibration --device cpu
-
-python run_dppo_training.py --config configs/debug.yaml --iterations 2 --episodes-per-iteration 1 --pretrained-checkpoint results/dppo/smoke/pretraining/dppo_pretrained.pt --stability-profile results/dppo/smoke/calibration/stability_profile.json --output-root results/dppo/smoke/online --device cpu
+python run_phase_e_pretraining.py --dataset results/phase_e/teachers.npz --output results/phase_e/pretrained.pt --observation-spec-hash <observation-sha256> --action-spec-hash <action-sha256> --steps 200 --device cuda
 ```
 
-成功后，`online` 目录应包含 `dppo_online_best.pt`、
-`dppo_online_last.pt` 和 `training_history.csv`。debug 配置只用于快速验证；
-论文实验应使用独立配置扩大数据量、校准 Episode 和在线训练迭代数。
+运行 32 个真实慢帧并完成两个事务 PPO 更新：
+
+```powershell
+python run_phase_e_online_training.py --config configs/debug.yaml --pretrained-checkpoint results/phase_e/pretrained.pt --teacher-dataset results/phase_e/teachers.npz --output results/phase_e/online --frames 32 --device cuda
+```
+
+从完整更新边界恢复到更大的总帧数：
+
+```powershell
+python run_phase_e_online_training.py --config configs/debug.yaml --pretrained-checkpoint results/phase_e/pretrained.pt --teacher-dataset results/phase_e/teachers.npz --output results/phase_e/online --frames 64 --resume-checkpoint results/phase_e/online/dppo_phase_e_last.pt --device cuda
+```
+
+成功后输出目录包含 `dppo_phase_e_best.pt`、`dppo_phase_e_last.pt` 和 `training_history.csv`。内部求解失败时写入 `failure_audit.json`，当前未提交 rollout 不进入 PPO。
 
 ### 双时间尺度主算法
 
 - 慢层 DPPO 一次生成整条 SFC 的副本数量、部署节点和保留时间；
-- 快层 CVXPY + CLARABEL 只在这些已部署副本之间分配当前请求；
-- 一个快时隙的请求可以拆分到多条完整 SFC 路径；
-- CLARABEL 未返回严格 `optimal` 时直接拒绝，不调用旧枚举器或其他求解器。
+- 快层 CVXPY + CLARABEL 在已部署温实例间联合分配上行、计算和有线商品流；
+- 两阶段词典序目标先最小化紧迫度加权服务缺口，再最小化资源成本；
+- 求解结果必须通过有限性、物理残差和四版本提交审计，不调用旧枚举器或启发式回退。
 
-DPPO 神经网络可通过 `dppo.training.device: cuda` 使用 GPU；CLARABEL 数学
-求解始终使用 CPU。快层配置位于 `dppo.fast_scheduler`。环境中的
-`fast_solver_status`、`fast_solver_objective_value`、`fast_solver_time_seconds`
-和 `fast_scheduled_execution_node_ids` 可用于论文记录。连续目标值是取整前的
-松弛解指标，最终实验成本仍以整数批次的真实执行结果为准。
+DPPO 神经网络可在 CUDA 上更新；CLARABEL 数学求解始终使用 CPU。快层配置位于
+`fast_resource_optimization`。每 16 个完整慢帧才提交一次 PPO 更新，内部失败会
+丢弃当前事务 rollout。正式训练 checkpoint 同时保存策略、价值网络、两个优化器、
+更新计数和随机数状态。
 
 检查本机求解环境：
 

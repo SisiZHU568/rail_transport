@@ -115,6 +115,13 @@ def _load_metadata(payload: dict) -> PhaseEOnlineMetadata:
         ) from error
 
 
+def read_phase_e_online_metadata(path: str | Path) -> PhaseEOnlineMetadata:
+    payload = torch.load(Path(path), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise ValueError("CHECKPOINT_SPEC_MISMATCH: checkpoint payload 无效。")
+    return _load_metadata(payload)
+
+
 def load_phase_e_online_checkpoint(
     path: str | Path,
     agent: DPPOAgent,
