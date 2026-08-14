@@ -60,7 +60,8 @@ node_resources:
 fast_resource_optimization:
   solver: CLARABEL
   max_iterations: 200
-  allow_optimal_inaccurate: false
+  # CLARABEL 偶尔返回 OPTIMAL_INACCURATE；只有全部物理残差仍通过时才接受。
+  allow_optimal_inaccurate: true
   noise_psd_watt_per_hz: 1.0e-12
   energy_price_per_joule: 0.01
   absolute_lex_tolerance: 1.0e-7
@@ -659,6 +660,8 @@ dppo:
       - 256
     batch_size: 64
     update_epochs: 10
+    # 在线 PPO 每累计 16 个完整慢帧才提交一次事务更新；内部失败整段丢弃。
+    rollout_length_slow_frames: 16
     gradient_clip_norm: 5.0
     # 每个小批次统一标准化优势，避免不同 Episode 的回报尺度影响 PPO 更新。
     normalize_advantages: true
@@ -688,3 +691,12 @@ dppo:
     # 随机种子按用途隔离：在线训练从 13000 开始，校准从 20000 开始，
     # 后续独立评估使用 30000 及以上，防止轨迹在不同阶段意外复用。
     calibration_seed_start: 20000
+
+# ============================================================
+# 阶段 E 最小在线闭环运行参数（GPU DPPO + CPU CLARABEL）
+# ============================================================
+phase_e_runtime:
+  channel_gain: 1.0e-6
+  reference_cost_per_slow_frame: 100.0
+  smoke_arrival_equivalent_bits: 200000.0
+  smoke_deadline_seconds: 10.0

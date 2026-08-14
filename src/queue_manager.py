@@ -143,11 +143,22 @@ class QueueStateManager:
         initial_stage_fragments: tuple[QueueFragment, ...] = (),
         initial_in_transit: tuple[InTransitRecord, ...] = (),
         initial_completion_events: tuple[CompletionEvent, ...] = (),
+        flow_absolute_tolerance_bits: float = 1e-6,
+        flow_relative_tolerance: float = 1e-12,
     ) -> None:
         if not math.isfinite(slot_seconds) or slot_seconds <= 0.0:
             raise ValueError("slot_seconds 必须是正有限数。")
+        if (
+            not math.isfinite(flow_absolute_tolerance_bits)
+            or flow_absolute_tolerance_bits < 0.0
+            or not math.isfinite(flow_relative_tolerance)
+            or flow_relative_tolerance < 0.0
+        ):
+            raise ValueError("流量守恒容差必须为非负有限数。")
         self.flow_config = flow_config
         self.slot_seconds = slot_seconds
+        self.flow_absolute_tolerance_bits = flow_absolute_tolerance_bits
+        self.flow_relative_tolerance = flow_relative_tolerance
         self._version = 0
         self._current_slot = 0
         self._batches = list(initial_batches)
@@ -155,6 +166,14 @@ class QueueStateManager:
         self._stage_fragments = list(initial_stage_fragments)
         self._in_transit = list(initial_in_transit)
         self._completion_events = list(initial_completion_events)
+
+    def _flow_tolerance(self, reference_bits: float) -> float:
+        """把求解器归一化残差换回 bit 后用于提交端的同口径审计。"""
+
+        return max(
+            self.flow_absolute_tolerance_bits,
+            self.flow_relative_tolerance * max(1.0, abs(reference_bits)),
+        )
 
     def snapshot(self) -> QueueSnapshot:
         return QueueSnapshot(
@@ -465,7 +484,8 @@ class QueueStateManager:
             quotas = [self._equivalent_amount(item) for item in operations]
             fragments = self._matching_fragments(key)
             available = sum(item.input_equivalent_bits for item in fragments)
-            if sum(quotas) > available + 1e-9:
+            tolerance = self._flow_tolerance(available)
+            if sum(quotas) > available + tolerance:
                 return self._reject("FLOW_EXCEEDS_AVAILABLE_QUEUE")
 
             for fragment in fragments:
@@ -559,7 +579,7 @@ class QueueStateManager:
                         residuals.append(
                             replace(fragment, input_equivalent_bits=remaining)
                         )
-            if any(quota > 1e-8 for quota in quotas):
+            if any(quota > tolerance for quota in quotas):
                 return self._reject("FLOW_CONSERVATION_VIOLATION")
 
         self._uplink_fragments = [

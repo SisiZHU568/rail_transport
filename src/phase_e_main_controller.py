@@ -29,6 +29,13 @@ class SlowDecisionResult:
     lifecycle_commit: LifecycleCommitResult | None
 
 
+@dataclass(frozen=True)
+class SlowDecisionProposal:
+    code: str
+    decoder_result: DecoderResult
+    lifecycle_plan: LifecycleDeploymentPlan | None
+
+
 class PhaseEMainController:
     """不做投影、不做启发式回退，提交失败时保持原状态。"""
 
@@ -39,7 +46,7 @@ class PhaseEMainController:
             config, self.action_spec, function_memory_mb=function_memory_mb
         )
 
-    def decode_and_commit(
+    def propose_deployment(
         self,
         policy_scores: np.ndarray,
         *,
@@ -52,7 +59,7 @@ class PhaseEMainController:
         domain_availability: Mapping[int, float] | None = None,
         node_conditional_availability: Mapping[int, float] | None = None,
         maximum_vnf_unavailability: Mapping[int, float] | None = None,
-    ) -> SlowDecisionResult:
+    ) -> SlowDecisionProposal:
         lifecycle = lifecycle_manager.snapshot()
         expected = (
             observation_versions.lifecycle_version,
@@ -63,7 +70,7 @@ class PhaseEMainController:
                 np.full(self.action_spec.action_dim, np.nan),
                 DecoderInput(failure_snapshot.effective_node_up, {}, required_replica_nodes),
             )
-            return SlowDecisionResult("STALE_SNAPSHOT", empty, None)
+            return SlowDecisionProposal("STALE_SNAPSHOT", empty, None)
         locked = {
             pair: lifecycle.locked_count(*pair, current_slot=lifecycle.current_slot)
             for pair in self.action_spec.pairs
@@ -82,7 +89,7 @@ class PhaseEMainController:
             ),
         )
         if decoded.code != "OK" or decoded.plan is None:
-            return SlowDecisionResult(decoded.code, decoded, None)
+            return SlowDecisionProposal(decoded.code, decoded, None)
         plan = LifecycleDeploymentPlan(
             lifecycle.version,
             failure_snapshot.version,
@@ -96,5 +103,45 @@ class PhaseEMainController:
                 for function_id, node_id in self.action_spec.pairs
             ),
         )
-        commit = lifecycle_manager.commit_deployment(plan, failure_snapshot)
-        return SlowDecisionResult("OK" if commit.accepted else commit.code, decoded, commit)
+        return SlowDecisionProposal("OK", decoded, plan)
+
+    def decode_and_commit(
+        self,
+        policy_scores: np.ndarray,
+        *,
+        lifecycle_manager: InstanceLifecycleManager,
+        failure_snapshot: FailureSnapshot,
+        observation_versions: ObservationBundleVersions,
+        required_replica_nodes: Mapping[int, int],
+        fault_domain_by_node: Mapping[int, int] | None = None,
+        minimum_fault_domains: Mapping[int, int] | None = None,
+        domain_availability: Mapping[int, float] | None = None,
+        node_conditional_availability: Mapping[int, float] | None = None,
+        maximum_vnf_unavailability: Mapping[int, float] | None = None,
+    ) -> SlowDecisionResult:
+        """保留独立调用入口；完整环境使用 propose 后由编排层统一提交。"""
+
+        proposal = self.propose_deployment(
+            policy_scores,
+            lifecycle_manager=lifecycle_manager,
+            failure_snapshot=failure_snapshot,
+            observation_versions=observation_versions,
+            required_replica_nodes=required_replica_nodes,
+            fault_domain_by_node=fault_domain_by_node,
+            minimum_fault_domains=minimum_fault_domains,
+            domain_availability=domain_availability,
+            node_conditional_availability=node_conditional_availability,
+            maximum_vnf_unavailability=maximum_vnf_unavailability,
+        )
+        if proposal.code != "OK" or proposal.lifecycle_plan is None:
+            return SlowDecisionResult(
+                proposal.code, proposal.decoder_result, None
+            )
+        commit = lifecycle_manager.commit_deployment(
+            proposal.lifecycle_plan, failure_snapshot
+        )
+        return SlowDecisionResult(
+            "OK" if commit.accepted else commit.code,
+            proposal.decoder_result,
+            commit,
+        )

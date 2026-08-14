@@ -16,7 +16,9 @@ from src.instance_lifecycle import InstanceBatch, LifecycleSnapshot, LifecycleSt
 from src.queue_state import BatchRecord, QueueFragment, QueueSnapshot, StageFlowConfig
 
 
-def config(*, max_cycles: float = 1e9) -> FastResourceConfig:
+def config(
+    *, max_cycles: float = 1e9, cloud_price_per_gcycle: float = 0.0
+) -> FastResourceConfig:
     return FastResourceConfig(
         slot_seconds=1.0,
         noise_psd_watt_per_hz=1e-12,
@@ -28,7 +30,11 @@ def config(*, max_cycles: float = 1e9) -> FastResourceConfig:
         solver_name="CLARABEL",
         max_iterations=200,
         allow_optimal_inaccurate=False,
-        nodes={0: NodeFastResource(0, max_cycles, 1, 1e-27, 0.1, 0.0)},
+        nodes={
+            0: NodeFastResource(
+                0, max_cycles, 1, 1e-27, 0.1, cloud_price_per_gcycle
+            )
+        },
         vnfs={(0, 0): VNFComputeResource(0, 0, 1000.0, max_cycles)},
     )
 
@@ -201,6 +207,19 @@ def test_remote_warm_instance_uses_causal_wired_forwarding() -> None:
     assert operation.destination_node_id == 1
     assert operation.link_id == 7
     assert operation.propagation_slots == 1
+    assert result.wired_cost == pytest.approx(1e-4, rel=1e-3)
+
+
+def test_cloud_execution_price_is_in_secondary_cost_and_result() -> None:
+    result = FastResourceOptimizer(
+        config(cloud_price_per_gcycle=2.0), StageFlowConfig((1.0,))
+    ).solve(queue(stage_bits=1e5), lifecycle(), failure(), network())
+
+    assert result.succeeded is True
+    assert result.cloud_cost == pytest.approx(0.2, rel=1e-3)
+    assert result.total_resource_cost == pytest.approx(
+        result.energy_cost + result.cpu_cost + result.wired_cost + result.cloud_cost
+    )
 
 
 def test_wired_capacity_limits_forwarding_with_finite_shortfall() -> None:

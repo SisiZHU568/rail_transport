@@ -101,6 +101,28 @@ def test_final_vnf_creates_next_slot_completion_event() -> None:
     assert completed.batches[0].completion_slot == 1
 
 
+def test_queue_commit_uses_configured_physical_solver_tolerance() -> None:
+    batch = BatchRecord("b", 0, 0.0, 10.0, total_input_equivalent_bits=4.0)
+    fragment = QueueFragment("f", "b", 0, 0, 0, None, 4.0, 0)
+    manager = QueueStateManager(
+        StageFlowConfig((1.0,)),
+        slot_seconds=1.0,
+        initial_batches=(batch,),
+        initial_stage_fragments=(fragment,),
+        flow_absolute_tolerance_bits=1e-3,
+    )
+    within_tolerance = AllocationOperation(
+        QueueKey.stage(0, 0, None), "execute", 4.0005
+    )
+
+    accepted = manager.commit_allocation(
+        plan(manager, (within_tolerance,)),
+        context(queue_version=0, current_slot=0),
+    )
+
+    assert accepted.accepted is True
+
+
 def test_wired_forwarding_has_at_least_one_slot_propagation() -> None:
     batch = BatchRecord("b", 0, 0.0, 10.0, total_input_equivalent_bits=3.0)
     fragment = QueueFragment("f", "b", 0, 0, 0, None, 3.0, 0)

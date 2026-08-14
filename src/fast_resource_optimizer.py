@@ -33,6 +33,14 @@ class FastResourceOptimizationResult:
     energy_cost: float
     cpu_cost: float
     maximum_residual: float
+    wired_cost: float = 0.0
+    cloud_cost: float = 0.0
+
+    @property
+    def total_resource_cost(self) -> float:
+        """返回统一货币单位的无线/计算能耗、CPU、有线与云成本。"""
+
+        return self.energy_cost + self.cpu_cost + self.wired_cost + self.cloud_cost
 
 
 @dataclass
@@ -429,8 +437,20 @@ class FastResourceOptimizer:
                 for item in variables for forward in item.forwards
             ]
         )
+        cloud_cost_expr = cp.sum(
+            [
+                self.config.nodes[item.key.location].cloud_price_per_gcycle
+                * item.work_gcycle
+                for item in variables if item.work_gcycle is not None
+            ]
+        )
         secondary_problem = cp.Problem(
-            cp.Minimize(energy_cost_expr + cpu_cost_expr + wired_cost_expr),
+            cp.Minimize(
+                energy_cost_expr
+                + cpu_cost_expr
+                + wired_cost_expr
+                + cloud_cost_expr
+            ),
             constraints_secondary,
         )
         start = perf_counter()
@@ -527,4 +547,6 @@ class FastResourceOptimizer:
             self._expression_value(energy_cost_expr),
             self._expression_value(cpu_cost_expr),
             maximum_residual,
+            self._expression_value(wired_cost_expr),
+            self._expression_value(cloud_cost_expr),
         )
