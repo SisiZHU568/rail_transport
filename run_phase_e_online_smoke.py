@@ -6,31 +6,16 @@ import numpy as np
 import torch
 
 from src.config import load_config
-from src.cost_ledger import CostLedger
 from src.dppo import DPPOAgent, DPPOBehaviorCloningBatch
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
 from src.dppo_training_config import build_dppo_agent_config
-from src.failure_process import ScriptedFailureProcess
-from src.fast_resource_model import (
-    NetworkLinkSnapshot,
-    NetworkSnapshot,
-    load_fast_resource_config,
-)
-from src.fast_resource_optimizer import FastResourceOptimizer
-from src.instance_lifecycle import InstanceLifecycleManager
-from src.orchestration_config import load_phase_a_config
-from src.orchestration_core import PhaseASlotCoordinator, PhaseBSlotCoordinator
-from src.phase_e_environment import ArrivalBatch, PhaseESlowFrameEnvironment
-from src.phase_e_main_controller import PhaseEMainController
-from src.phase_e_observation_adapter import PhaseEObservationAdapter
+from src.phase_e_environment import ArrivalBatch
 from src.phase_e_online_trainer import PhaseEOnlineTrainer
+from src.phase_e_runtime import build_phase_e_runtime
 from src.phase_e_training_entry import (
     load_phase_e_pretrained_policy,
     load_teacher_dataset,
 )
-from src.queue_manager import QueueStateManager
-from src.queue_state import StageFlowConfig
-from src.topology import build_linear_topology
 
 
 def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
@@ -44,34 +29,6 @@ def parse_arguments(arguments: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
-def _network_links(raw: dict, mec_count: int, include_cloud: bool):
-    network = raw["network"]
-    links: list[NetworkLinkSnapshot] = []
-    link_id = 0
-    edge_capacity = float(network["adjacent_bandwidth_mbps"]) * 1e6
-    edge_delay = float(network["propagation_delay_per_hop_ms"]) / 1000.0
-    edge_price = float(network["edge_data_cost_per_mb_hop"]) / 8e6
-    for node_id in range(mec_count - 1):
-        for source, destination in ((node_id, node_id + 1), (node_id + 1, node_id)):
-            links.append(NetworkLinkSnapshot(
-                link_id, source, destination, edge_capacity, edge_delay, edge_price
-            ))
-            link_id += 1
-    if include_cloud:
-        cloud_id = mec_count
-        cloud_capacity = float(network["cloud_backhaul_bandwidth_mbps"]) * 1e6
-        cloud_delay = float(network["cloud_one_way_propagation_delay_ms"]) / 1000.0
-        cloud_price = float(network["cloud_data_cost_per_mb"]) / 8e6
-        for mec_id in range(mec_count):
-            for source, destination in ((mec_id, cloud_id), (cloud_id, mec_id)):
-                links.append(NetworkLinkSnapshot(
-                    link_id, source, destination,
-                    cloud_capacity, cloud_delay, cloud_price,
-                ))
-                link_id += 1
-    return tuple(links)
-
-
 def main(arguments: list[str] | None = None) -> None:
     args = parse_arguments(arguments)
     if args.frames <= 0:
@@ -81,70 +38,12 @@ def main(arguments: list[str] | None = None) -> None:
     if bool(args.pretrained_checkpoint) != bool(args.teacher_dataset):
         raise SystemExit("正式在线训练必须同时提供预训练检查点和教师数据集。")
     raw = load_config(args.config)
-    config = load_phase_a_config(raw)
-    topology = build_linear_topology(raw)
-    memory = {
-        item["function_id"]: float(item["memory_mb"])
-        for item in raw["rl_scenario"]["functions"]
-    }
-    function_ids = tuple(sorted(memory))
-    lifecycle = InstanceLifecycleManager(config=config, function_memory_mb=memory)
-    ledger = CostLedger()
-    phase_a = PhaseASlotCoordinator(
-        ScriptedFailureProcess(topology), lifecycle, ledger
-    )
-    flow = StageFlowConfig(tuple(
-        float(item["output_ratio"]) for item in raw["rl_scenario"]["functions"]
-    ))
-    queues = QueueStateManager(
-        flow,
-        slot_seconds=config.fast_slot_seconds,
-        # 快层 residual_tolerance 使用 Mbit，提交端必须换回 bit 后同口径审计。
-        flow_absolute_tolerance_bits=(
-            float(raw["fast_resource_optimization"]["residual_tolerance"])
-            * 1e6
-        ),
-    )
-    optimizer = FastResourceOptimizer(load_fast_resource_config(raw), flow)
-    controller = PhaseEMainController(config, memory)
-    reliability_target = float(raw["rl_scenario"]["sfc"]["reliability_target"])
-    minimum_domains = int(raw["reliability"]["minimum_distinct_fault_domains"])
-    fault_domain_by_node = {
-        node.node_id: node.fault_domain for node in topology.compute_nodes
-    }
-    runtime = raw["phase_e_runtime"]
-    environment = PhaseESlowFrameEnvironment(
-        controller=controller,
-        coordinator=PhaseBSlotCoordinator(phase_a, queues),
-        optimizer=optimizer,
-        lifecycle_manager=lifecycle,
-        queue_manager=queues,
-        cost_ledger=ledger,
-        required_replica_nodes={item: minimum_domains for item in function_ids},
-        fault_domain_by_node=fault_domain_by_node,
-        minimum_fault_domains={item: minimum_domains for item in function_ids},
-        domain_availability={
-            domain_id: rates.steady_availability
-            for domain_id, rates in config.domain_rates.items()
-        },
-        node_conditional_availability={
-            node_id: rates.steady_availability
-            for node_id, rates in config.node_rates.items()
-        },
-        maximum_vnf_unavailability={
-            item: (1.0 - reliability_target) / len(function_ids)
-            for item in function_ids
-        },
-        reference_cost=float(runtime["reference_cost_per_slow_frame"]),
-    )
-    mec_count = int(raw["topology"]["mec_count"])
-    links = _network_links(raw, mec_count, raw["topology"].get("include_cloud") is True)
-    total_slots = args.frames * config.slow_frame_slots
-    observation_adapter = PhaseEObservationAdapter(
-        config, controller.action_spec,
-        total_episode_slots=total_slots,
-        maximum_drain_slots=0,
-    )
+    phase_runtime = build_phase_e_runtime(raw, total_slow_frames=args.frames)
+    config = phase_runtime.config
+    controller = phase_runtime.controller
+    environment = phase_runtime.environment
+    observation_adapter = phase_runtime.observation_adapter
+    runtime_settings = raw["phase_e_runtime"]
     trainer: PhaseEOnlineTrainer | None = None
     current_decision = None
     current_state = None
@@ -217,7 +116,7 @@ def main(arguments: list[str] | None = None) -> None:
             update_metrics = trainer.update_if_ready(state)
             current_decision = trainer.sample_decision(
                 state,
-                seed=int(raw["dppo"]["training"]["seed"]) + frame_index,
+                seed=phase_runtime.training_seed + frame_index,
             )
             current_state = state
             return current_decision.scores
@@ -230,24 +129,15 @@ def main(arguments: list[str] | None = None) -> None:
                     ArrivalBatch(
                         f"smoke-{frame_index}",
                         0,
-                        float(runtime["smoke_arrival_equivalent_bits"]),
+                        float(runtime_settings["smoke_arrival_equivalent_bits"]),
                         start_slot * config.fast_slot_seconds
-                        + float(runtime["smoke_deadline_seconds"]),
+                        + float(runtime_settings["smoke_deadline_seconds"]),
                     ),
                 )
             },
-            network_for_slot=lambda slot: NetworkSnapshot(
-                version=slot + 1,
-                current_slot=slot,
-                serving_mec=min(mec_count - 1, frame_index),
-                channel_gain=float(runtime["channel_gain"]),
-                uplink_bandwidth_hz=float(
-                    raw["fast_resource_optimization"]["uplink_bandwidth_hz"]
-                ),
-                maximum_uplink_power_watt=float(
-                    raw["fast_resource_optimization"]["maximum_uplink_power_watt"]
-                ),
-                links=links,
+            network_for_slot=lambda slot: phase_runtime.network_for_slot(
+                slot,
+                frame_index=frame_index,
             ),
             training_mode=True,
         )
