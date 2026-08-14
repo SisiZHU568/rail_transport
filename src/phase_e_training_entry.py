@@ -6,6 +6,9 @@ from pathlib import Path
 import tempfile
 
 import numpy as np
+import torch
+
+from src.dppo_diffusion import ConditionalDiffusionMLP
 
 
 @dataclass(frozen=True)
@@ -21,6 +24,80 @@ class TeacherDataset:
     teacher_types: np.ndarray
     plan_jsons: np.ndarray
     predicted_metrics: np.ndarray
+
+
+@dataclass(frozen=True)
+class LoadedPhaseEPretrainedPolicy:
+    """经过规格和数值审计、可直接交给在线 DPPO 的预训练策略。"""
+
+    model: ConditionalDiffusionMLP
+    optimizer_steps: int
+
+
+def load_phase_e_pretrained_policy(
+    path: str | Path,
+    *,
+    expected_observation_hash: str,
+    expected_action_hash: str,
+    state_dim: int,
+    action_dim: int,
+    device: str | torch.device,
+) -> LoadedPhaseEPretrainedPolicy:
+    """加载轻量 Phase E 预训练产物，规格不一致时禁止截断或重排。"""
+
+    resolved_device = torch.device(device)
+    if resolved_device.type not in {"cpu", "cuda"}:
+        raise ValueError("预训练策略设备只能是 cpu 或 cuda。")
+    if resolved_device.type == "cuda" and not torch.cuda.is_available():
+        raise ValueError("请求了 CUDA，但当前环境不可用。")
+    payload = torch.load(Path(path), map_location=resolved_device, weights_only=True)
+    required = {
+        "format_version",
+        "observation_spec_hash",
+        "action_spec_hash",
+        "state_dim",
+        "action_dim",
+        "model_hidden_dims",
+        "model_state_dict",
+        "optimizer_steps",
+    }
+    if not isinstance(payload, dict) or not required <= set(payload):
+        raise ValueError("Phase E 预训练检查点结构不完整。")
+    if payload["format_version"] != "phase-e-pretrained-v1":
+        raise ValueError("Phase E 预训练检查点版本不受支持。")
+    if (
+        payload["observation_spec_hash"] != expected_observation_hash
+        or payload["action_spec_hash"] != expected_action_hash
+        or payload["state_dim"] != state_dim
+        or payload["action_dim"] != action_dim
+    ):
+        raise ValueError("CHECKPOINT_SPEC_MISMATCH")
+    hidden_dims = payload["model_hidden_dims"]
+    if not isinstance(hidden_dims, (tuple, list)) or not hidden_dims or any(
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0
+        for value in hidden_dims
+    ):
+        raise ValueError("预训练检查点的 model_hidden_dims 无效。")
+    optimizer_steps = payload["optimizer_steps"]
+    if (
+        isinstance(optimizer_steps, bool)
+        or not isinstance(optimizer_steps, int)
+        or optimizer_steps <= 0
+    ):
+        raise ValueError("预训练检查点的 optimizer_steps 必须为正整数。")
+    model = ConditionalDiffusionMLP(
+        state_dim,
+        action_dim,
+        tuple(hidden_dims),
+    ).to(resolved_device)
+    try:
+        model.load_state_dict(payload["model_state_dict"], strict=True)
+    except (KeyError, RuntimeError, TypeError) as error:
+        raise ValueError("预训练策略参数与模型结构不一致。") from error
+    if any(not torch.isfinite(value).all() for value in model.state_dict().values()):
+        raise ValueError("预训练策略参数包含非有限值。")
+    model.eval()
+    return LoadedPhaseEPretrainedPolicy(model, optimizer_steps)
 
 
 @dataclass(frozen=True)

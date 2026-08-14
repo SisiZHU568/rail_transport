@@ -2,13 +2,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
+from src.dppo_diffusion import ConditionalDiffusionMLP
 from src.phase_e_training_entry import (
     TeacherDatasetRecord,
+    load_phase_e_pretrained_policy,
     load_teacher_dataset,
     save_teacher_dataset,
 )
 from run_phase_e_pretraining import parse_arguments
+from run_phase_e_online_smoke import parse_arguments as parse_online_arguments
 
 
 def test_teacher_dataset_binds_specs_and_keeps_v_and_u(tmp_path: Path) -> None:
@@ -113,3 +117,72 @@ def test_pretraining_cli_requires_dataset_and_output() -> None:
     assert args.dataset == "teachers.npz"
     assert args.output == "model.pt"
     assert args.steps == 3
+
+
+def test_online_entry_loads_spec_bound_phase_e_pretrained_policy(tmp_path: Path) -> None:
+    model = ConditionalDiffusionMLP(5, 4, (8, 8))
+    path = tmp_path / "pretrained.pt"
+    torch.save({
+        "format_version": "phase-e-pretrained-v1",
+        "observation_spec_hash": "obs",
+        "action_spec_hash": "act",
+        "state_dim": 5,
+        "action_dim": 4,
+        "model_hidden_dims": (8, 8),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": {},
+        "optimizer_steps": 20,
+    }, path)
+
+    loaded = load_phase_e_pretrained_policy(
+        path,
+        expected_observation_hash="obs",
+        expected_action_hash="act",
+        state_dim=5,
+        action_dim=4,
+        device="cpu",
+    )
+
+    assert loaded.optimizer_steps == 20
+    assert loaded.model.hidden_dims == (8, 8)
+    assert all(
+        torch.equal(value, loaded.model.state_dict()[name])
+        for name, value in model.state_dict().items()
+    )
+
+
+def test_online_entry_rejects_pretrained_policy_spec_mismatch(tmp_path: Path) -> None:
+    model = ConditionalDiffusionMLP(2, 2, (4,))
+    path = tmp_path / "bad.pt"
+    torch.save({
+        "format_version": "phase-e-pretrained-v1",
+        "observation_spec_hash": "old",
+        "action_spec_hash": "act",
+        "state_dim": 2,
+        "action_dim": 2,
+        "model_hidden_dims": (4,),
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": {},
+        "optimizer_steps": 1,
+    }, path)
+
+    with pytest.raises(ValueError, match="CHECKPOINT_SPEC_MISMATCH"):
+        load_phase_e_pretrained_policy(
+            path,
+            expected_observation_hash="new",
+            expected_action_hash="act",
+            state_dim=2,
+            action_dim=2,
+            device="cpu",
+        )
+
+
+def test_online_cli_accepts_pretrained_policy_and_teacher_dataset_together() -> None:
+    args = parse_online_arguments([
+        "--pretrained-checkpoint", "pretrained.pt",
+        "--teacher-dataset", "teachers.npz",
+        "--frames", "17",
+    ])
+
+    assert args.pretrained_checkpoint == "pretrained.pt"
+    assert args.teacher_dataset == "teachers.npz"
