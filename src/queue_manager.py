@@ -300,14 +300,15 @@ class QueueStateManager:
                 batch.completed_input_equivalent_bits
                 + completed_by_batch.get(batch.batch_id, 0.0)
             )
-            if completed > batch.total_input_equivalent_bits + 1e-9:
+            completion_tolerance = self._flow_tolerance(
+                batch.total_input_equivalent_bits
+            )
+            if completed > batch.total_input_equivalent_bits + completion_tolerance:
                 raise ValueError("completion flow 超过批次原始输入等效量。")
             completion_slot = batch.completion_slot
-            if math.isclose(
-                completed,
-                batch.total_input_equivalent_bits,
-                rel_tol=1e-12,
-                abs_tol=1e-9,
+            if (
+                abs(completed - batch.total_input_equivalent_bits)
+                <= completion_tolerance
             ):
                 completed = batch.total_input_equivalent_bits
                 completion_slot = completion_slot_by_batch.get(
@@ -522,9 +523,12 @@ class QueueStateManager:
                 remaining = fragment.input_equivalent_bits
                 consumed = 0.0
                 for index, operation in enumerate(operations):
-                    if quotas[index] <= 1e-9 or remaining <= 1e-9:
+                    if quotas[index] <= 0.0 or remaining <= 0.0:
                         continue
                     amount = min(remaining, quotas[index])
+                    tail = remaining - amount
+                    if amount > 0.0 and 0.0 < tail <= tolerance:
+                        amount = remaining
                     child_id = _stable_id(
                         "fragment",
                         fragment.fragment_id,
@@ -603,9 +607,9 @@ class QueueStateManager:
                     remaining -= amount
                     consumed += amount
                     quotas[index] -= amount
-                if consumed > 1e-9:
+                if consumed > 0.0:
                     consumed_ids.add(fragment.fragment_id)
-                    if remaining > 1e-9:
+                    if remaining > tolerance:
                         residuals.append(
                             replace(fragment, input_equivalent_bits=remaining)
                         )

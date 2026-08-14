@@ -291,3 +291,64 @@ def test_queue_manager_clone_from_snapshot_is_exact_and_independent() -> None:
     clone.admit_batch("batch-only-in-clone", 0, 0.0, 10.0, 10.0)
     assert clone.snapshot() != manager.snapshot()
     assert len(manager.snapshot().batches) == 1
+
+
+def test_commit_absorbs_numeric_tail_into_last_successful_operation() -> None:
+    manager = QueueStateManager(
+        StageFlowConfig((1.0,)),
+        slot_seconds=1.0,
+        flow_absolute_tolerance_bits=10.0,
+    )
+    manager.admit_batch("batch", 0, 0.0, 20.0, 100.0)
+
+    result = manager.commit_allocation(
+        plan(
+            manager,
+            (
+                AllocationOperation(
+                    QueueKey.uplink(0),
+                    "uplink",
+                    95.0,
+                    destination_node_id=0,
+                ),
+            ),
+        ),
+        context(queue_version=manager.snapshot().version, current_slot=0),
+    )
+
+    assert result.accepted
+    assert result.snapshot.uplink_fragments == ()
+    assert sum(
+        item.input_equivalent_bits for item in result.snapshot.stage_fragments
+    ) == 100.0
+
+
+def test_final_stage_tail_completes_batch_with_shared_tolerance() -> None:
+    manager = QueueStateManager(
+        StageFlowConfig((1.0,)),
+        slot_seconds=1.0,
+        initial_batches=(BatchRecord("batch", 0, 0.0, 20.0, 100.0),),
+        initial_stage_fragments=(
+            QueueFragment("final", "batch", 0, 0, 0, None, 100.0, 0),
+        ),
+        flow_absolute_tolerance_bits=10.0,
+    )
+
+    result = manager.commit_allocation(
+        plan(
+            manager,
+            (
+                AllocationOperation(
+                    QueueKey.stage(0, 0, None),
+                    "execute",
+                    95.0,
+                ),
+            ),
+        ),
+        context(queue_version=manager.snapshot().version, current_slot=0),
+    )
+    completed = manager.begin_slot(1).batches[0]
+
+    assert result.accepted
+    assert completed.completed_input_equivalent_bits == 100.0
+    assert completed.completion_slot == 1
