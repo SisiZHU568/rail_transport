@@ -76,7 +76,21 @@ def test_load_settings_and_build_agent_config_map_every_algorithm_field() -> Non
     settings = load_dppo_stability_settings(config)
     agent = build_dppo_agent_config(config, clip_ratio=0.01)
 
-    assert settings == _settings()
+    stability = config["dppo"]["stability"]
+    assert settings == DPPOStabilitySettings(
+        training_sampling_min_std=stability["training_sampling_min_std"],
+        probability_min_std=stability["probability_min_std"],
+        evaluation_sampling_min_std=stability["evaluation_sampling_min_std"],
+        target_kl=stability["target_kl"],
+        target_clip_fraction_min=stability["target_clip_fraction_min"],
+        target_clip_fraction_max=stability["target_clip_fraction_max"],
+        clip_ratio_candidates=tuple(stability["clip_ratio_candidates"]),
+        calibration_iterations=stability["calibration_iterations"],
+        calibration_episodes_per_iteration=stability[
+            "calibration_episodes_per_iteration"
+        ],
+        calibration_seed_start=stability["calibration_seed_start"],
+    )
     assert agent.gamma == config["dppo"]["training"]["gamma"]
     assert agent.gae_lambda == config["dppo"]["training"]["gae_lambda"]
     assert agent.clip_ratio == 0.01
@@ -116,7 +130,7 @@ def test_build_agent_config_rejects_non_sequence_value_hidden_dims(invalid) -> N
         (("target_kl",), math.nan),
         (("target_clip_fraction_min",), -0.01),
         (("target_clip_fraction_max",), 1.01),
-        (("target_clip_fraction_min",), 0.21),
+        (("target_clip_fraction_min",), 0.86),
         (("clip_ratio_candidates",), []),
         (("clip_ratio_candidates",), [0.1, 0.1]),
         (("clip_ratio_candidates",), [1.0]),
