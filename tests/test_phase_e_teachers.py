@@ -1,14 +1,25 @@
 import numpy as np
 
 from src.config import load_config
+from src.fast_resource_model import NetworkLinkSnapshot, NetworkSnapshot, load_fast_resource_config
+from src.fast_resource_optimizer import FastResourceOptimizer
 from src.failure_process import ScriptedFailureProcess
-from src.instance_lifecycle import InstanceLifecycleManager
+from src.instance_lifecycle import (
+    DeploymentTarget,
+    InstanceLifecycleManager,
+    LifecycleDeploymentPlan,
+)
 from src.orchestration_config import load_phase_a_config
 from src.phase_e_teacher_generation import (
+    CausalTeacherProxy,
     TeacherMetrics,
     build_teacher_candidate,
     generate_exact_teacher_labels,
 )
+from src.phase_e_environment import ArrivalBatch
+from src.phase_e_main_controller import PhaseEMainController
+from src.queue_manager import QueueStateManager
+from src.queue_state import StageFlowConfig
 from src.phase_e_teachers import TeacherCandidate, select_teacher_labels
 from src.safe_deployment_decoder import ActionSpec, DecoderInput, SafeDeploymentDecoder
 from src.topology import build_linear_topology
@@ -94,3 +105,63 @@ def test_exact_teacher_search_limit_never_returns_partial_labels() -> None:
     assert result.code == "TEACHER_SEARCH_LIMIT"
     assert result.labels == ()
     assert result.candidate_count == 0
+
+
+def test_causal_teacher_proxy_runs_real_fast_path_without_mutating_state() -> None:
+    raw = load_config("configs/debug.yaml")
+    config, manager, failure, spec, decoder, decoder_input = _teacher_context()
+    flow = StageFlowConfig(tuple(
+        float(item["output_ratio"]) for item in raw["rl_scenario"]["functions"]
+    ))
+    queues = QueueStateManager(flow, slot_seconds=config.fast_slot_seconds)
+    queues.admit_batch("teacher-batch", 0, 0.0, 10.0, 2e5)
+    plan = decoder.decode(np.full(spec.action_dim, 0.35), decoder_input).plan
+    lifecycle_plan = LifecycleDeploymentPlan(
+        manager.snapshot().version,
+        failure.version,
+        manager.snapshot().current_slot,
+        tuple(
+            DeploymentTarget(function_id, node_id, plan.instance_counts[pair], plan.retention_slots[pair])
+            for pair in spec.pairs
+            for function_id, node_id in (pair,)
+        ),
+    )
+    preview = manager.preview_deployment(lifecycle_plan, failure)
+    links = tuple(
+        NetworkLinkSnapshot(
+            2 * node_id + direction,
+            node_id if direction == 0 else node_id + 1,
+            node_id + 1 if direction == 0 else node_id,
+            10e6,
+            0.1,
+            1e-9,
+        )
+        for node_id in range(len(config.node_resources) - 1)
+        for direction in (0, 1)
+    )
+    proxy = CausalTeacherProxy(
+        controller=PhaseEMainController(config, manager.function_memory_mb),
+        optimizer=FastResourceOptimizer(load_fast_resource_config(raw), flow),
+        lifecycle_manager=manager,
+        queue_manager=queues,
+        failure_snapshot=failure,
+        structural_reliability_margin=lambda _: 0.02,
+        function_cycles_per_input_bit={
+            item["function_id"]: float(item["cpu_cycles_per_input_bit"])
+            for item in raw["rl_scenario"]["functions"]
+        },
+        network_for_slot=lambda slot: NetworkSnapshot(
+            slot + 1, slot, 0, 1e-6, 1e6, 1.0, links
+        ),
+        predicted_arrivals_by_slot={},
+    )
+    lifecycle_before = manager.snapshot()
+    queue_before = queues.snapshot()
+
+    metrics = proxy.evaluate(plan, preview)
+
+    assert metrics.predicted_deficit >= 0.0
+    assert metrics.predicted_cost >= 0.0
+    assert metrics.structural_reliability_margin == 0.02
+    assert manager.snapshot() == lifecycle_before
+    assert queues.snapshot() == queue_before

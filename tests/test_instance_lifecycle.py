@@ -301,3 +301,20 @@ def test_lifecycle_snapshot_memory_mapping_is_immutable() -> None:
 
     with pytest.raises(TypeError):
         snapshot.memory_used_mb_by_node[0] = 123.0  # type: ignore[index]
+
+
+def test_lifecycle_manager_clone_from_snapshot_is_exact_and_independent() -> None:
+    batch = InstanceBatch("warm", 0, 0, LifecycleStatus.WARM, 1, 0, 5)
+    manager, _ = build_manager(batches=(batch,))
+    manager.advance_to_slot(2)
+    source = manager.snapshot()
+
+    clone = InstanceLifecycleManager.from_snapshot(
+        config=manager.config,
+        function_memory_mb=manager.function_memory_mb,
+        snapshot=source,
+    )
+
+    assert clone.snapshot() == source
+    clone.advance_to_slot(3)
+    assert manager.snapshot().current_slot == 2

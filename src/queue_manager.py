@@ -140,6 +140,7 @@ class QueueStateManager:
         *,
         slot_seconds: float,
         initial_batches: tuple[BatchRecord, ...] = (),
+        initial_uplink_fragments: tuple[QueueFragment, ...] = (),
         initial_stage_fragments: tuple[QueueFragment, ...] = (),
         initial_in_transit: tuple[InTransitRecord, ...] = (),
         initial_completion_events: tuple[CompletionEvent, ...] = (),
@@ -162,10 +163,39 @@ class QueueStateManager:
         self._version = 0
         self._current_slot = 0
         self._batches = list(initial_batches)
-        self._uplink_fragments: list[QueueFragment] = []
+        self._uplink_fragments = list(initial_uplink_fragments)
         self._stage_fragments = list(initial_stage_fragments)
         self._in_transit = list(initial_in_transit)
         self._completion_events = list(initial_completion_events)
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        flow_config: StageFlowConfig,
+        snapshot: QueueSnapshot,
+        *,
+        slot_seconds: float,
+        flow_absolute_tolerance_bits: float = 1e-6,
+        flow_relative_tolerance: float = 1e-12,
+    ) -> "QueueStateManager":
+        """为教师/验证创建完全独立的队列副本，不回写真实环境。"""
+
+        if not isinstance(snapshot, QueueSnapshot):
+            raise TypeError("snapshot 必须是 QueueSnapshot。")
+        clone = cls(
+            flow_config,
+            slot_seconds=slot_seconds,
+            initial_batches=snapshot.batches,
+            initial_uplink_fragments=snapshot.uplink_fragments,
+            initial_stage_fragments=snapshot.stage_fragments,
+            initial_in_transit=snapshot.in_transit,
+            initial_completion_events=snapshot.completion_events,
+            flow_absolute_tolerance_bits=flow_absolute_tolerance_bits,
+            flow_relative_tolerance=flow_relative_tolerance,
+        )
+        clone._version = snapshot.version
+        clone._current_slot = snapshot.current_slot
+        return clone
 
     def _flow_tolerance(self, reference_bits: float) -> float:
         """把求解器归一化残差换回 bit 后用于提交端的同口径审计。"""

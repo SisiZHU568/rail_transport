@@ -159,6 +159,29 @@ class InstanceLifecycleManager:
         self._assert_batches_supported(self._batches)
         self._audit_memory(self._batches)
 
+    @classmethod
+    def from_snapshot(
+        cls,
+        *,
+        config: PhaseAConfig,
+        function_memory_mb: dict[int, float],
+        snapshot: LifecycleSnapshot,
+    ) -> "InstanceLifecycleManager":
+        """为教师或验证创建生命周期副本，保留快照版本与当前时隙。"""
+
+        if not isinstance(snapshot, LifecycleSnapshot):
+            raise TypeError("snapshot 必须是 LifecycleSnapshot。")
+        clone = cls(
+            config=config,
+            function_memory_mb=function_memory_mb,
+            initial_batches=snapshot.batches,
+        )
+        clone._version = snapshot.version
+        clone._current_slot = snapshot.current_slot
+        if clone.snapshot() != snapshot:
+            raise ValueError("LifecycleSnapshot 的派生内存与实例批次不一致。")
+        return clone
+
     def _assert_batches_supported(self, batches: list[InstanceBatch]) -> None:
         for batch in batches:
             if (batch.function_id, batch.node_id) not in self.config.deployment_pairs:

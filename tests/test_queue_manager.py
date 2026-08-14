@@ -274,3 +274,20 @@ def test_invalid_plan_is_rejected_atomically(mode: str) -> None:
         "STALE_SNAPSHOT" if mode == "stale" else "FLOW_EXCEEDS_AVAILABLE_QUEUE"
     )
     assert manager.snapshot() == before
+
+
+def test_queue_manager_clone_from_snapshot_is_exact_and_independent() -> None:
+    manager = QueueStateManager(StageFlowConfig((1.0,)), slot_seconds=1.0)
+    manager.admit_batch("batch-clone", 0, 0.0, 10.0, 100.0)
+    source = manager.snapshot()
+
+    clone = QueueStateManager.from_snapshot(
+        manager.flow_config,
+        source,
+        slot_seconds=manager.slot_seconds,
+    )
+
+    assert clone.snapshot() == source
+    clone.admit_batch("batch-only-in-clone", 0, 0.0, 10.0, 10.0)
+    assert clone.snapshot() != manager.snapshot()
+    assert len(manager.snapshot().batches) == 1
