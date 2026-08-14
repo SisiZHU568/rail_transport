@@ -10,6 +10,7 @@ import torch
 import src.dppo as dppo_module
 from src.dppo import (
     DPPOAgent,
+    DPPOBehaviorCloningBatch,
     DPPOConfig,
     DPPORolloutBuffer,
     DPPORolloutTransition,
@@ -94,6 +95,55 @@ def _rollout_buffer(agent: DPPOAgent, rewards: tuple[float, ...]) -> DPPORollout
             )
         )
     return buffer
+
+
+def _teacher_batch(agent: DPPOAgent, sample_count: int = 5) -> DPPOBehaviorCloningBatch:
+    """构造与当前模型规格一致的完整无界教师动作。"""
+
+    states = np.stack(
+        [
+            np.linspace(-0.25, 0.25, agent.state_dim, dtype=np.float32)
+            + index * 0.01
+            for index in range(sample_count)
+        ]
+    )
+    actions = np.stack(
+        [
+            np.linspace(-0.4, 0.4, agent.action_dim, dtype=np.float32)
+            - index * 0.02
+            for index in range(sample_count)
+        ]
+    )
+    return DPPOBehaviorCloningBatch(states=states, unbounded_actions=actions)
+
+
+def test_update_combines_online_bc_with_same_policy_optimizer_step() -> None:
+    """在线 BC 应并入 PPO 的同一次反向传播，而不是额外更新策略。"""
+
+    agent = _small_agent(batch_size=2, update_epochs=1)
+    buffer = _rollout_buffer(agent, (0.2, 0.1, -0.3, 0.4))
+
+    metrics = agent.update(
+        buffer,
+        teacher_batch=_teacher_batch(agent),
+        behavior_cloning_weight=0.05,
+    )
+
+    assert metrics["optimizer_step_count"] == 2.0
+    assert metrics["behavior_cloning_weight"] == pytest.approx(0.05)
+    assert math.isfinite(metrics["behavior_cloning_loss"])
+    assert metrics["behavior_cloning_loss"] >= 0.0
+    assert len(buffer) == 0
+
+
+def test_update_rejects_positive_bc_weight_without_teacher_before_mutation() -> None:
+    agent = _small_agent(batch_size=2, update_epochs=1)
+    buffer = _rollout_buffer(agent, (0.2, -0.1))
+
+    with pytest.raises(ValueError, match="teacher_batch"):
+        agent.update(buffer, behavior_cloning_weight=0.05)
+
+    assert len(buffer) == 2
 
 
 def test_update_uses_official_dppo_loss_settings(
@@ -743,6 +793,8 @@ def test_update_changes_only_trainable_policy_and_clears_buffer() -> None:
         "gradient_norm",
         "optimizer_step_count",
         "kl_early_stopped",
+        "behavior_cloning_loss",
+        "behavior_cloning_weight",
     }
     assert metrics["optimizer_step_count"] == 4.0
     assert metrics["kl_early_stopped"] == 0.0

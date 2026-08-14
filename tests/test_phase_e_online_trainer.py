@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from src.dppo import DPPOAgent, DPPOConfig
+from src.dppo import DPPOAgent, DPPOBehaviorCloningBatch, DPPOConfig
 from src.dppo_diffusion import ConditionalDiffusionMLP, CosineNoiseSchedule
 from src.phase_e_environment import PhaseESlowFrameResult
 from src.phase_e_online_trainer import PhaseEOnlineTrainer
@@ -68,3 +68,29 @@ def test_internal_failure_discards_only_current_uncommitted_rollout() -> None:
     assert discarded == 1
     assert trainer.pending_count == 0
     assert trainer.internal_failure_count == 1
+
+
+def test_online_trainer_applies_early_decaying_teacher_bc() -> None:
+    agent = _agent()
+    states = np.stack(
+        [np.full(agent.state_dim, index / 10, dtype=np.float32) for index in range(4)]
+    )
+    actions = np.stack(
+        [np.full(agent.action_dim, -0.2 + index / 20, dtype=np.float32) for index in range(4)]
+    )
+    trainer = PhaseEOnlineTrainer(
+        agent,
+        rollout_length_slow_frames=2,
+        teacher_batch=DPPOBehaviorCloningBatch(states, actions),
+        total_online_updates=10,
+    )
+    state = np.zeros(agent.state_dim, dtype=np.float32)
+    for index in range(2):
+        decision = trainer.sample_decision(state + index * 0.1, seed=50 + index)
+        trainer.record_result(decision, _success(-0.1), terminated=False)
+
+    metrics = trainer.update_if_ready(state + 0.3)
+
+    assert metrics is not None
+    assert metrics["behavior_cloning_weight"] == 0.05
+    assert metrics["behavior_cloning_loss"] >= 0.0

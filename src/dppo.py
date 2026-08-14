@@ -16,6 +16,7 @@ from src.dppo_diffusion import (
     ConditionalDiffusionMLP,
     CosineNoiseSchedule,
     DenoisingSample,
+    diffusion_noise_loss,
 )
 from src.dppo_official_core import official_dppo_policy_loss
 
@@ -295,6 +296,28 @@ class DPPORolloutBuffer:
 
     def __len__(self) -> int:
         return len(self.transitions)
+
+
+@dataclass(frozen=True)
+class DPPOBehaviorCloningBatch:
+    """在线阶段只读的教师观察与完整无界动作 v。"""
+
+    states: np.ndarray
+    unbounded_actions: np.ndarray
+
+    def __post_init__(self) -> None:
+        states = _immutable_float_array("teacher states", self.states, 2)
+        actions = _immutable_float_array(
+            "teacher unbounded_actions",
+            self.unbounded_actions,
+            2,
+        )
+        if states.shape[0] == 0:
+            raise ValueError("teacher_batch 不能为空。")
+        if states.shape[0] != actions.shape[0]:
+            raise ValueError("teacher states 与 unbounded_actions 批大小必须一致。")
+        object.__setattr__(self, "states", states)
+        object.__setattr__(self, "unbounded_actions", actions)
 
 
 def compute_gae(
@@ -726,13 +749,28 @@ class DPPOAgent:
         buffer: DPPORolloutBuffer,
         *,
         next_value: float = 0.0,
+        teacher_batch: DPPOBehaviorCloningBatch | None = None,
+        behavior_cloning_weight: float = 0.0,
     ) -> dict[str, float]:
-        """用当前 rollout 执行多轮裁剪 PPO 和价值网络更新。"""
+        """执行 PPO；训练早期可在同一策略步中叠加完整动作扩散 BC。"""
 
         if not isinstance(buffer, DPPORolloutBuffer):
             raise TypeError("buffer 必须是 DPPORolloutBuffer。")
         if len(buffer) == 0:
             raise ValueError("空 rollout buffer 不能执行更新。")
+        bc_weight = _finite_float(
+            "behavior_cloning_weight",
+            behavior_cloning_weight,
+        )
+        if bc_weight < 0.0:
+            raise ValueError("behavior_cloning_weight 不能为负。")
+        if bc_weight > 0.0 and teacher_batch is None:
+            raise ValueError("正的 BC 权重必须提供 teacher_batch。")
+        if teacher_batch is not None and not isinstance(
+            teacher_batch,
+            DPPOBehaviorCloningBatch,
+        ):
+            raise TypeError("teacher_batch 必须是 DPPOBehaviorCloningBatch。")
         transitions = tuple(buffer.transitions)
         expected_chain_shape = (
             self.config.diffusion_steps + 1,
@@ -791,9 +829,30 @@ class DPPOAgent:
             dtype=parameter.dtype,
             device=self.device,
         )
+        teacher_states: torch.Tensor | None = None
+        teacher_actions: torch.Tensor | None = None
+        if teacher_batch is not None:
+            if teacher_batch.states.shape[1] != self.state_dim:
+                raise ValueError("teacher_batch state_dim 与策略不一致。")
+            if teacher_batch.unbounded_actions.shape[1] != self.action_dim:
+                raise ValueError("teacher_batch action_dim 与策略不一致。")
+            teacher_states = torch.tensor(
+                teacher_batch.states,
+                dtype=parameter.dtype,
+                device=self.device,
+            )
+            teacher_actions = torch.tensor(
+                teacher_batch.unbounded_actions,
+                dtype=parameter.dtype,
+                device=self.device,
+            )
 
         generator = torch.Generator(device="cpu").manual_seed(self.config.seed)
+        bc_noise_generator = torch.Generator(device=self.device).manual_seed(
+            self.config.seed + 1
+        )
         policy_losses: list[float] = []
+        behavior_cloning_losses: list[float] = []
         value_losses: list[float] = []
         approximate_kls: list[float] = []
         clip_fractions: list[float] = []
@@ -857,8 +916,33 @@ class DPPOAgent:
                     float(official_loss.clip_fraction.detach().cpu().item())
                 )
                 self._require_finite_loss("policy_loss", policy_loss)
+                combined_policy_loss = policy_loss
+                if bc_weight > 0.0:
+                    assert teacher_states is not None
+                    assert teacher_actions is not None
+                    # 每个 PPO 策略步抽取同样大小的教师批次；BC 与 PPO 各自先取均值，
+                    # 然后只进行一次反向传播和一次 optimizer.step。
+                    teacher_cpu_indices = torch.randint(
+                        teacher_states.shape[0],
+                        (batch_states.shape[0],),
+                        generator=generator,
+                        device="cpu",
+                    )
+                    teacher_indices = teacher_cpu_indices.to(self.device)
+                    bc_loss = diffusion_noise_loss(
+                        self.trainable_policy,
+                        self.schedule,
+                        teacher_states.index_select(0, teacher_indices),
+                        teacher_actions.index_select(0, teacher_indices),
+                        bc_noise_generator,
+                    )
+                    self._require_finite_loss("behavior_cloning_loss", bc_loss)
+                    combined_policy_loss = policy_loss + bc_weight * bc_loss
+                    behavior_cloning_losses.append(
+                        float(bc_loss.detach().cpu().item())
+                    )
                 self.policy_optimizer.zero_grad(set_to_none=True)
-                policy_loss.backward()
+                combined_policy_loss.backward()
                 policy_parameters = tuple(self.trainable_policy.parameters())
                 policy_gradient_norm = self._clip_and_check_gradients(
                     "策略网络",
@@ -903,6 +987,12 @@ class DPPOAgent:
             ),
             "optimizer_step_count": float(optimizer_step_count),
             "kl_early_stopped": float(kl_early_stopped),
+            "behavior_cloning_loss": (
+                float(np.mean(behavior_cloning_losses))
+                if behavior_cloning_losses
+                else 0.0
+            ),
+            "behavior_cloning_weight": bc_weight,
         }
         if not all(math.isfinite(value) for value in metrics.values()):
             raise FloatingPointError("DDPO 更新指标出现非有限值。")

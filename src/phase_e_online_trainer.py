@@ -6,11 +6,13 @@ import numpy as np
 
 from src.dppo import (
     DPPOAgent,
+    DPPOBehaviorCloningBatch,
     DPPORolloutBuffer,
     DPPORolloutTransition,
 )
 from src.phase_d_policy_specs import PolicyAdapter
 from src.phase_e_environment import PhaseESlowFrameResult
+from src.phase_e_learning import online_bc_weight
 
 
 @dataclass(frozen=True)
@@ -45,12 +47,20 @@ class PhaseEOnlineTrainer:
         agent: DPPOAgent,
         *,
         rollout_length_slow_frames: int,
+        teacher_batch: DPPOBehaviorCloningBatch | None = None,
+        total_online_updates: int = 0,
     ) -> None:
         if rollout_length_slow_frames <= 0:
             raise ValueError("rollout_length_slow_frames 必须为正。")
         self.agent = agent
         self.adapter = PolicyAdapter(agent.action_dim)
         self.rollout_length_slow_frames = rollout_length_slow_frames
+        if teacher_batch is not None and total_online_updates <= 0:
+            raise ValueError("启用在线教师 BC 时 total_online_updates 必须为正。")
+        if teacher_batch is None and total_online_updates != 0:
+            raise ValueError("未提供 teacher_batch 时不能设置 total_online_updates。")
+        self.teacher_batch = teacher_batch
+        self.total_online_updates = total_online_updates
         self._pending: list[DPPORolloutTransition] = []
         self.completed_update_count = 0
         self.internal_failure_count = 0
@@ -121,7 +131,18 @@ class PhaseEOnlineTrainer:
         for transition in self._pending:
             buffer.append(transition)
         next_value = float(self.agent.value(np.asarray(next_state, dtype=np.float32)))
-        metrics = self.agent.update(buffer, next_value=next_value)
+        bc_weight = 0.0
+        if self.teacher_batch is not None:
+            bc_weight = online_bc_weight(
+                self.completed_update_count,
+                total_updates=self.total_online_updates,
+            )
+        metrics = self.agent.update(
+            buffer,
+            next_value=next_value,
+            teacher_batch=self.teacher_batch,
+            behavior_cloning_weight=bc_weight,
+        )
         self._pending.clear()
         self.completed_update_count += 1
         return metrics
