@@ -142,3 +142,66 @@ def test_decoder_uses_union_bound_unavailability_budget() -> None:
         for (function_id, _), count in result.plan.instance_counts.items()
         if function_id == 0
     ) >= 2
+
+
+def test_teacher_plan_can_be_encoded_and_decoded_without_change() -> None:
+    config = load_phase_a_config(load_config("configs/debug.yaml"))
+    spec = ActionSpec.from_phase_a_config(config)
+    decoder = SafeDeploymentDecoder(
+        config, spec, function_memory_mb={0: 256, 1: 512, 2: 768}
+    )
+    decoder_input = DecoderInput(
+        effective_node_up={node_id: True for node_id in config.node_resources},
+        locked_instance_counts={},
+        required_replica_nodes={0: 1, 1: 1, 2: 1},
+    )
+    original = decoder.decode(np.full(spec.action_dim, 0.35), decoder_input)
+
+    encoded = decoder.encode_plan(original.plan, decoder_input)
+    decoded = decoder.decode(encoded.scores, decoder_input)
+
+    assert encoded.code == "OK"
+    assert decoded.code == "OK"
+    assert decoded.plan == original.plan
+    assert np.all((encoded.scores > 0.0) & (encoded.scores < 1.0))
+
+
+def test_teacher_enumeration_discards_partial_results_when_limit_is_hit() -> None:
+    config = load_phase_a_config(load_config("configs/debug.yaml"))
+    spec = ActionSpec.from_phase_a_config(config)
+    decoder = SafeDeploymentDecoder(
+        config, spec, function_memory_mb={0: 256, 1: 512, 2: 768}
+    )
+    result = decoder.enumerate_safe_plans(
+        DecoderInput(
+            effective_node_up={node_id: True for node_id in config.node_resources},
+            locked_instance_counts={},
+            required_replica_nodes={0: 1, 1: 1, 2: 1},
+        ),
+        max_generated_patterns=1,
+        retention_slots_by_pair={pair: spec.retention_slot_options[0] for pair in spec.pairs},
+    )
+
+    assert result.code == "DECODER_SEARCH_LIMIT"
+    assert result.plans == ()
+    assert result.generated_patterns == 1
+
+
+def test_teacher_enumeration_reports_proven_empty_safe_set() -> None:
+    config = load_phase_a_config(load_config("configs/debug.yaml"))
+    spec = ActionSpec.from_phase_a_config(config)
+    decoder = SafeDeploymentDecoder(
+        config, spec, function_memory_mb={0: 256, 1: 512, 2: 768}
+    )
+    result = decoder.enumerate_safe_plans(
+        DecoderInput(
+            effective_node_up={node_id: False for node_id in config.node_resources},
+            locked_instance_counts={},
+            required_replica_nodes={0: 1, 1: 1, 2: 1},
+        ),
+        max_generated_patterns=10,
+        retention_slots_by_pair={},
+    )
+
+    assert result.code == "NO_SAFE_FEASIBLE_DEPLOYMENT"
+    assert result.plans == ()

@@ -121,6 +121,26 @@ class DecoderResult:
     elapsed_seconds: float
 
 
+@dataclass(frozen=True)
+class PlanEncodingResult:
+    """教师计划反向编码结果；非 OK 时不返回可用于训练的部分评分。"""
+
+    code: str
+    scores: np.ndarray
+
+
+@dataclass(frozen=True)
+class PlanEnumerationResult:
+    """完整安全计划枚举结果；达到上限时主动丢弃已生成的部分集合。"""
+
+    code: str
+    plans: tuple[DeploymentPlan, ...]
+    generated_patterns: int
+    expanded_states: int
+    pruned_states: int
+    elapsed_seconds: float
+
+
 class SafeDeploymentDecoder:
     """按固定 pair 顺序解码，并用后续可完成性检查屏蔽候选。"""
 
@@ -281,6 +301,128 @@ class SafeDeploymentDecoder:
                 return None
         assignments.pop(pair, None)
         return None
+
+    def enumerate_safe_plans(
+        self,
+        decoder_input: DecoderInput,
+        *,
+        max_generated_patterns: int,
+        retention_slots_by_pair: Mapping[tuple[int, int], int],
+    ) -> PlanEnumerationResult:
+        """确定性枚举并集界安全集合，绝不把搜索上限前的部分结果当作完整集合。"""
+
+        started = perf_counter()
+        if max_generated_patterns <= 0:
+            raise ValueError("max_generated_patterns 必须为正整数。")
+        self._expanded = self._pruned = 0
+        self._limit_hit = False
+        plans: list[DeploymentPlan] = []
+        generated_patterns = 0
+
+        def visit(index: int, assignments: dict[tuple[int, int], int]) -> None:
+            nonlocal generated_patterns
+            self._expanded += 1
+            if self._expanded > self.max_expanded_states:
+                self._limit_hit = True
+                return
+            if not self._partial_possible(assignments, index, decoder_input):
+                self._pruned += 1
+                return
+            if index == len(self.action_spec.pairs):
+                if generated_patterns >= max_generated_patterns:
+                    self._limit_hit = True
+                    return
+                retention: dict[tuple[int, int], int] = {}
+                for pair in self.action_spec.pairs:
+                    if assignments[pair] == 0:
+                        retention[pair] = 0
+                        continue
+                    value = retention_slots_by_pair.get(pair)
+                    if value not in self.action_spec.retention_slot_options:
+                        raise ValueError(f"已部署组合 {pair} 缺少合法保留时间档位。")
+                    retention[pair] = int(value)
+                plans.append(DeploymentPlan(dict(assignments), retention))
+                generated_patterns += 1
+                return
+            pair = self.action_spec.pairs[index]
+            function_id, node_id = pair
+            candidates = self.config.allowed_instance_counts(function_id, node_id)
+            if not decoder_input.effective_node_up.get(node_id, False):
+                candidates = (0,)
+            for candidate in candidates:
+                assignments[pair] = candidate
+                visit(index + 1, assignments)
+                if self._limit_hit:
+                    return
+            assignments.pop(pair, None)
+
+        visit(0, {})
+        code = (
+            "DECODER_SEARCH_LIMIT"
+            if self._limit_hit
+            else "OK" if plans else "NO_SAFE_FEASIBLE_DEPLOYMENT"
+        )
+        return PlanEnumerationResult(
+            code=code,
+            plans=tuple(plans) if code == "OK" else (),
+            generated_patterns=generated_patterns,
+            expanded_states=self._expanded,
+            pruned_states=self._pruned,
+            elapsed_seconds=perf_counter() - started,
+        )
+
+    def encode_plan(
+        self,
+        plan: DeploymentPlan | None,
+        decoder_input: DecoderInput,
+    ) -> PlanEncodingResult:
+        """把教师计划编码为每个可行候选区间的中点，并用同一解码器完成复验。"""
+
+        empty = np.empty(0, dtype=np.float64)
+        empty.setflags(write=False)
+        if plan is None or set(plan.instance_counts) != set(self.action_spec.pairs):
+            return PlanEncodingResult("INVALID_DEPLOYMENT_PLAN", empty)
+        self._expanded = self._pruned = 0
+        self._limit_hit = False
+        scores = np.full(self.action_spec.action_dim, 0.5, dtype=np.float64)
+        assignments: dict[tuple[int, int], int] = {}
+        for index, pair in enumerate(self.action_spec.pairs):
+            function_id, node_id = pair
+            candidates = self.config.allowed_instance_counts(function_id, node_id)
+            if not decoder_input.effective_node_up.get(node_id, False):
+                candidates = (0,)
+            feasible: list[int] = []
+            for candidate in candidates:
+                if self._complete(
+                    index + 1, {**assignments, pair: candidate}, decoder_input
+                ) is not None:
+                    feasible.append(candidate)
+                if self._limit_hit:
+                    return PlanEncodingResult("DECODER_SEARCH_LIMIT", empty)
+            target = plan.instance_counts[pair]
+            if target not in feasible:
+                return PlanEncodingResult("INVALID_DEPLOYMENT_PLAN", empty)
+            target_index = feasible.index(target)
+            scores[2 * index] = (target_index + 0.5) / len(feasible)
+            assignments[pair] = target
+
+            retention = plan.retention_slots.get(pair, 0)
+            if target == 0:
+                if retention != 0:
+                    return PlanEncodingResult("INVALID_DEPLOYMENT_PLAN", empty)
+                continue
+            options = self.action_spec.retention_slot_options
+            if retention not in options:
+                return PlanEncodingResult("INVALID_DEPLOYMENT_PLAN", empty)
+            retention_index = options.index(retention)
+            scores[2 * index + 1] = (retention_index + 0.5) / len(options)
+
+        # 教师样本入库前必须通过同一状态、同一规格和同一解码器的往返校验。
+        verification = self.decode(scores, decoder_input)
+        if verification.code != "OK" or verification.plan != plan:
+            return PlanEncodingResult("PLAN_ROUNDTRIP_MISMATCH", empty)
+        scores.setflags(write=False)
+        return PlanEncodingResult("OK", scores)
 
     @staticmethod
     def _score_index(score: float, size: int) -> int:

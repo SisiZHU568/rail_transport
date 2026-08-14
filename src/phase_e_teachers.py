@@ -1,9 +1,9 @@
 """从因果安全候选中生成三类服务优先教师标签。"""
 
 from dataclasses import dataclass
-from types import MappingProxyType
-
 import numpy as np
+
+from src.safe_deployment_decoder import DeploymentPlan
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,10 @@ class TeacherCandidate:
     structural_reliability_margin: float
     balance_score: float
     canonical_key: str
+    plan: DeploymentPlan | None = None
+    effective_action_mask: tuple[bool, ...] = ()
+    balance_variance: float = 0.0
+    eligible_teacher_types: tuple[str, ...] = ("COST", "RELIABILITY", "BALANCE")
 
 
 @dataclass(frozen=True)
@@ -23,6 +27,13 @@ class TeacherLabel:
     scores: np.ndarray
     unbounded_action: np.ndarray
     teacher_types: tuple[str, ...]
+    plan: DeploymentPlan | None = None
+    effective_action_mask: tuple[bool, ...] = ()
+    predicted_deficit: float = 0.0
+    predicted_cost: float = 0.0
+    structural_reliability_margin: float = 0.0
+    balance_score: float = 0.0
+    balance_variance: float = 0.0
 
 
 def select_teacher_labels(candidates: tuple[TeacherCandidate, ...]) -> tuple[TeacherLabel, ...]:
@@ -34,17 +45,29 @@ def select_teacher_labels(candidates: tuple[TeacherCandidate, ...]) -> tuple[Tea
             (candidate.scores > 0.0) & (candidate.scores < 1.0)
         ):
             raise ValueError("教师评分必须严格位于 (0,1)，以便保存无界变量 v。")
-    selected = {
-        "COST": min(candidates, key=lambda item: (
-            item.predicted_deficit, item.predicted_cost,
-            -item.structural_reliability_margin, item.balance_score, item.canonical_key)),
-        "RELIABILITY": min(candidates, key=lambda item: (
-            item.predicted_deficit, -item.structural_reliability_margin,
-            item.predicted_cost, item.balance_score, item.canonical_key)),
-        "BALANCE": min(candidates, key=lambda item: (
-            item.predicted_deficit, item.balance_score, item.predicted_cost,
-            -item.structural_reliability_margin, item.canonical_key)),
+    pools = {
+        teacher_type: tuple(
+            item for item in candidates
+            if teacher_type in item.eligible_teacher_types
+        )
+        for teacher_type in ("COST", "RELIABILITY", "BALANCE")
     }
+    selected: dict[str, TeacherCandidate] = {}
+    if pools["COST"]:
+        selected["COST"] = min(pools["COST"], key=lambda item: (
+            item.predicted_deficit, item.predicted_cost,
+            -item.structural_reliability_margin, item.balance_score,
+            item.balance_variance, item.canonical_key))
+    if pools["RELIABILITY"]:
+        selected["RELIABILITY"] = min(pools["RELIABILITY"], key=lambda item: (
+            item.predicted_deficit, -item.structural_reliability_margin,
+            item.predicted_cost, item.balance_score, item.balance_variance,
+            item.canonical_key))
+    if pools["BALANCE"]:
+        selected["BALANCE"] = min(pools["BALANCE"], key=lambda item: (
+            item.predicted_deficit, item.balance_score, item.balance_variance,
+            item.predicted_cost, -item.structural_reliability_margin,
+            item.canonical_key))
     grouped: dict[str, list[str]] = {}
     by_hash: dict[str, TeacherCandidate] = {}
     for teacher_type, candidate in selected.items():
@@ -61,5 +84,12 @@ def select_teacher_labels(candidates: tuple[TeacherCandidate, ...]) -> tuple[Tea
         labels.append(TeacherLabel(
             plan_hash, scores, unbounded,
             tuple(sorted(grouped[plan_hash], key=order.__getitem__)),
+            candidate.plan,
+            candidate.effective_action_mask,
+            candidate.predicted_deficit,
+            candidate.predicted_cost,
+            candidate.structural_reliability_margin,
+            candidate.balance_score,
+            candidate.balance_variance,
         ))
     return tuple(labels)
