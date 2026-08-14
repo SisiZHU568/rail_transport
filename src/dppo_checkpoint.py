@@ -25,8 +25,10 @@ from src.dppo_stability import (
 class DPPOCheckpointMetadata:
     """保存决定检查点能否安全复用的全部实验模式字段。"""
 
-    state_schema_version: str
-    action_schema_version: str
+    observation_spec_hash: str
+    action_spec_hash: str
+    model_architecture_hash: str
+    normalization_state_version: int
     state_dim: int
     action_dim: int
     mec_count: int
@@ -34,17 +36,15 @@ class DPPOCheckpointMetadata:
     function_count: int
     diffusion_steps: int
     fine_tuned_steps: int
-    maximum_retention_seconds: float
-    minimum_replicas: int
-    maximum_replicas: int
     config_hash: str
 
     def __post_init__(self) -> None:
         """拒绝无法构成合法 DPPO 场景或动作编码的元数据。"""
 
         for name in (
-            "state_schema_version",
-            "action_schema_version",
+            "observation_spec_hash",
+            "action_spec_hash",
+            "model_architecture_hash",
             "config_hash",
         ):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
@@ -57,22 +57,13 @@ class DPPOCheckpointMetadata:
             "function_count",
             "diffusion_steps",
             "fine_tuned_steps",
-            "minimum_replicas",
-            "maximum_replicas",
+            "normalization_state_version",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} 必须是正整数。")
         if self.fine_tuned_steps > self.diffusion_steps:
             raise ValueError("fine_tuned_steps 不能大于 diffusion_steps。")
-        retention = float(self.maximum_retention_seconds)
-        if not math.isfinite(retention) or retention <= 0.0:
-            raise ValueError("maximum_retention_seconds 必须是正有限数。")
-        if self.minimum_replicas > self.maximum_replicas:
-            raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
-        if self.maximum_replicas > self.compute_node_count:
-            raise ValueError("maximum_replicas 不能大于 compute_node_count。")
-        object.__setattr__(self, "maximum_retention_seconds", retention)
 
 
 @dataclass(frozen=True)

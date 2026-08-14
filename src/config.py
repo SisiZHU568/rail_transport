@@ -80,43 +80,6 @@ def validate_config(config: dict[str, Any]) -> None:
     _require_mapping(scenario, "sfc")
 
     dppo = _require_mapping(config, "dppo")
-    action = _require_mapping(dppo, "action")
-    maximum_retention = action.get("maximum_retention_seconds")
-    if (
-        isinstance(maximum_retention, bool)
-        or not isinstance(maximum_retention, (int, float))
-        or not math.isfinite(float(maximum_retention))
-        or float(maximum_retention) <= 0.0
-    ):
-        raise ValueError("maximum_retention_seconds 必须是正有限数。")
-    minimum_replicas = _require_positive_integer(action, "minimum_replicas")
-    maximum_replicas = _require_positive_integer(action, "maximum_replicas")
-    if minimum_replicas > maximum_replicas:
-        raise ValueError("minimum_replicas 不能大于 maximum_replicas。")
-    # DPPO 当前只把轨旁 MEC 和中心云作为 VNF 部署节点，车载节点不计入上限。
-    compute_node_count = mec_count + int(topology.get("include_cloud") is True)
-    if maximum_replicas > compute_node_count:
-        raise ValueError("maximum_replicas 不能大于 compute_node_count。")
-
-    fast_scheduler = _require_mapping(dppo, "fast_scheduler")
-    if fast_scheduler.get("solver") != "CLARABEL":
-        raise ValueError("dppo.fast_scheduler.solver 当前必须为 CLARABEL。")
-    _require_positive_integer(
-        fast_scheduler,
-        "max_iterations",
-        display_key="dppo.fast_scheduler.max_iterations",
-    )
-    feasibility_tolerance = fast_scheduler.get("feasibility_tolerance")
-    if (
-        isinstance(feasibility_tolerance, bool)
-        or not isinstance(feasibility_tolerance, (int, float))
-        or not math.isfinite(float(feasibility_tolerance))
-        or float(feasibility_tolerance) <= 0.0
-    ):
-        raise ValueError(
-            "dppo.fast_scheduler.feasibility_tolerance 必须是正有限数。"
-        )
-
     diffusion = _require_mapping(dppo, "diffusion")
     diffusion_steps = _require_positive_integer(diffusion, "steps")
     fine_tuned_steps = _require_positive_integer(diffusion, "fine_tuned_steps")
@@ -181,6 +144,8 @@ def validate_config(config: dict[str, Any]) -> None:
         display_key="dppo.pretraining.validation_interval_steps",
     )
 
+    # 先校验阶段 A 的部署组合，确保跨阶段错误优先指出原始配置路径。
+    load_phase_a_config(config)
     # 阶段 C 的物理参数同样在训练开始前一次性严格解析。
     load_fast_resource_config(config)
     _require_positive_integer(
@@ -209,9 +174,6 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("dppo.pretraining.output_root 必须是非空字符串。")
 
     training = _require_mapping(dppo, "training")
-    state_schema_version = training.get("state_schema_version")
-    if not isinstance(state_schema_version, str) or not state_schema_version:
-        raise ValueError("dppo.training.state_schema_version 必须是非空字符串。")
     for key in (
         "iterations",
         "episodes_per_iteration",
@@ -283,7 +245,6 @@ def validate_config(config: dict[str, Any]) -> None:
 
     # 阶段 A 的物理单位、CTMC 率和 VNF—节点组合在同一次加载中校验，
     # 避免仿真运行到一半才发现引用或容量配置错误。
-    load_phase_a_config(config)
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:

@@ -19,27 +19,17 @@ def test_load_debug_config() -> None:
     assert config["serverless"]["survival_slots"] == 20
     assert len(config["rl_scenario"]["functions"]) == 3
     assert config["rl_scenario"]["sfc"]["function_ids"] == [0, 1, 2]
-    assert config["dppo"]["action"]["maximum_retention_seconds"] == 20.0
-    assert config["dppo"]["action"]["schema_version"] == "joint-sfc-continuous-v2"
-    assert config["dppo"]["action"]["minimum_replicas"] == 2
-    assert config["dppo"]["action"]["maximum_replicas"] == 3
-    assert config["dppo"]["fast_scheduler"] == {
-        "solver": "CLARABEL",
-        "max_iterations": 200,
-        "feasibility_tolerance": 1.0e-7,
-    }
     assert config["dppo"]["diffusion"]["steps"] == 20
     assert config["dppo"]["diffusion"]["fine_tuned_steps"] == 5
     assert config["dppo"]["pretraining"]["optimizer_steps"] == 200
     assert config["dppo"]["pretraining"]["validation_interval_steps"] == 10
     assert (
         config["dppo"]["dataset"]["teacher_schema_version"]
-        == "balanced-min-replica-reliability-v1"
+        == "phase-e-service-first-multimodal-v1"
     )
     assert config["dppo"]["training"]["iterations"] > 0
     assert config["dppo"]["training"]["episodes_per_iteration"] > 0
     assert config["dppo"]["training"]["value_hidden_dims"] == [256, 256]
-    assert config["dppo"]["training"]["state_schema_version"] == "dppo-v2-flat"
     assert config["dppo"]["training"]["normalize_advantages"] is True
     assert config["dppo"]["training"]["policy_learning_rate"] == 0.0001
     assert config["dppo"]["training"]["clip_ratio_base"] == 0.001
@@ -58,27 +48,6 @@ def test_load_debug_config() -> None:
     }
     assert config["dppo"]["training"]["seed"] == 13000
     assert 20000 <= stability["calibration_seed_start"] < 30000
-
-
-@pytest.mark.parametrize(
-    ("key", "invalid_value"),
-    (
-        ("solver", "HIGHS"),
-        ("max_iterations", 0),
-        ("feasibility_tolerance", 0.0),
-    ),
-)
-def test_validate_config_rejects_invalid_fast_scheduler_setting(
-    key: str,
-    invalid_value: object,
-) -> None:
-    """快层只允许使用一组明确且有物理意义的 CLARABEL 配置。"""
-
-    config = deepcopy(load_config("configs/debug.yaml"))
-    config["dppo"]["fast_scheduler"][key] = invalid_value
-
-    with pytest.raises(ValueError, match=rf"dppo\.fast_scheduler\.{key}"):
-        validate_config(config)
 
 
 def test_validate_config_rejects_dataset_fractions_not_summing_to_one() -> None:
@@ -108,49 +77,6 @@ def test_validate_config_matches_fault_domains_to_mec_count() -> None:
     config["topology"]["mec_fault_domain_ids"] = [0, 1]
 
     with pytest.raises(ValueError, match="mec_fault_domain_ids.*mec_count"):
-        validate_config(config)
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("minimum_replicas", True),
-        ("minimum_replicas", 0),
-        ("maximum_replicas", 0),
-        ("maximum_replicas", 2.5),
-    ),
-)
-def test_validate_config_rejects_invalid_replica_bounds(
-    field: str,
-    value: object,
-) -> None:
-    """副本上下限必须是正整数，避免产生无法执行的部署数量。"""
-
-    config = deepcopy(load_config("configs/debug.yaml"))
-    config["dppo"]["action"][field] = value
-
-    with pytest.raises(ValueError, match=field):
-        validate_config(config)
-
-
-def test_validate_config_rejects_reversed_replica_bounds() -> None:
-    """下限不能大于上限。"""
-
-    config = deepcopy(load_config("configs/debug.yaml"))
-    config["dppo"]["action"]["minimum_replicas"] = 4
-    config["dppo"]["action"]["maximum_replicas"] = 3
-
-    with pytest.raises(ValueError, match="minimum_replicas.*maximum_replicas"):
-        validate_config(config)
-
-
-def test_validate_config_rejects_replica_maximum_above_compute_nodes() -> None:
-    """副本上限不能超过 DPPO 实际可部署的 MEC 与中心云节点总数。"""
-
-    config = deepcopy(load_config("configs/debug.yaml"))
-    config["dppo"]["action"]["maximum_replicas"] = 99
-
-    with pytest.raises(ValueError, match="compute_node_count"):
         validate_config(config)
 
 

@@ -244,11 +244,9 @@ def test_constraint_audit_preserves_diagnostic_details() -> None:
         violation_reasons=(
             "节点0的CPU需求120.000超过容量100.000。",
         ),
-        replica_count_violation_function_ids=(0,),
     )
 
     assert audit.cpu_violation_node_ids == (0,)
-    assert audit.replica_count_violation_function_ids == (0,)
     assert audit.exact_sfc_reliability == pytest.approx(
         0.98
     )

@@ -335,9 +335,6 @@ class SlotConstraintAudit:
     # 使用中文保存详细原因，便于直接查看日志和实验结果。
     violation_reasons: tuple[str, ...]
 
-    # 实际副本数与慢层许可数量不一致的函数编号。
-    # 默认空元组用于兼容尚未迁移到新审计器的旧调用位置。
-    replica_count_violation_function_ids: tuple[int, ...] = ()
 
 
 @dataclass

@@ -383,12 +383,6 @@ prediction_cost_demo:
 # ============================================================
 
 reliability:
-  # 每个函数默认部署的副本数量。
-  #
-  # replica_count=2 表示：
-  # 1个主实例 + 1个备用实例。
-  replica_count: 2
-
   # 一组函数副本至少需要分布在多少个不同故障域。
   #
   # 当前设置为2，表示主实例和备用实例
@@ -606,19 +600,6 @@ rl_environment:
 # ============================================================
 
 dppo:
-  action:
-    schema_version: joint-sfc-continuous-v2
-    maximum_retention_seconds: 20.0
-    # 每个 VNF 的副本数上下限；扩展实验规模时只需修改这里。
-    minimum_replicas: 2
-    maximum_replicas: 3
-
-  fast_scheduler:
-    # 快层数学规划固定由 CPU 上的 CLARABEL 求解；它不占用 DPPO 的 GPU。
-    solver: CLARABEL
-    max_iterations: 200
-    feasibility_tolerance: 1.0e-7
-
   diffusion:
     steps: 20
     fine_tuned_steps: 5
@@ -631,7 +612,7 @@ dppo:
     episodes: 1000
     seed_start: 40000
     # 教师规则变化会改变专家标签；版本进入配置哈希，防止混用新旧数据。
-    teacher_schema_version: balanced-min-replica-reliability-v1
+    teacher_schema_version: phase-e-service-first-multimodal-v1
     # 数据集划分只按 Episode seed 进行，固定随机种子保证划分可复现。
     split_seed: 41000
     # 一个 Episode 固定使用一种教师，Episode 之间按下列顺序循环。
@@ -659,8 +640,6 @@ dppo:
     output_root: results/dppo/pretraining
 
   training:
-    # v2 将历史“三副本比例”改为“配置上限副本比例”。
-    state_schema_version: dppo-v2-flat
     # 在线训练的外层迭代次数和每次迭代收集的完整 Episode 数量。
     iterations: 200
     episodes_per_iteration: 8

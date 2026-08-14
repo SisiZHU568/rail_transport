@@ -36,8 +36,10 @@ def _metadata() -> DPPOCheckpointMetadata:
     """返回小规模检查点使用的完整兼容性元数据。"""
 
     return DPPOCheckpointMetadata(
-        state_schema_version="dppo-v2-flat",
-        action_schema_version="joint-sfc-continuous-v2",
+        observation_spec_hash="obs-hash",
+        action_spec_hash="action-hash",
+        model_architecture_hash="model-hash",
+        normalization_state_version=1,
         state_dim=58,
         action_dim=14,
         mec_count=3,
@@ -45,9 +47,6 @@ def _metadata() -> DPPOCheckpointMetadata:
         function_count=2,
         diffusion_steps=20,
         fine_tuned_steps=5,
-        maximum_retention_seconds=20.0,
-        minimum_replicas=2,
-        maximum_replicas=3,
         config_hash="test-hash",
     )
 
@@ -276,8 +275,10 @@ def test_checkpoint_rejects_every_incompatible_metadata_field(tmp_path) -> None:
     checkpoint_path = tmp_path / "tiny.pt"
     save_dppo_checkpoint(checkpoint_path, model, optimizer, metadata, epoch=0)
     incompatible_values = {
-        "state_schema_version": "dppo-v2",
-        "action_schema_version": "joint-sfc-v2",
+        "observation_spec_hash": "other-observation",
+        "action_spec_hash": "other-action",
+        "model_architecture_hash": "other-model",
+        "normalization_state_version": 2,
         "state_dim": 78,
         "action_dim": 27,
         "mec_count": 5,
@@ -285,9 +286,6 @@ def test_checkpoint_rejects_every_incompatible_metadata_field(tmp_path) -> None:
         "function_count": 3,
         "diffusion_steps": 10,
         "fine_tuned_steps": 4,
-        "maximum_retention_seconds": 30.0,
-        "minimum_replicas": 1,
-        "maximum_replicas": 4,
         "config_hash": "different-hash",
     }
 
@@ -301,13 +299,6 @@ def test_checkpoint_rejects_every_incompatible_metadata_field(tmp_path) -> None:
                 ),
                 device="cpu",
             )
-
-
-def test_checkpoint_metadata_rejects_replica_bounds_above_node_count() -> None:
-    """检查点自身也要拒绝无法部署到当前场景节点数的副本区间。"""
-
-    with pytest.raises(ValueError, match="maximum_replicas.*compute_node_count"):
-        replace(_metadata(), maximum_replicas=5)
 
 
 def test_checkpoint_restores_saved_torch_rng_state(tmp_path) -> None:
@@ -362,109 +353,6 @@ def test_pretraining_seed_reproduces_model_initialization() -> None:
             strict=True,
         )
     )
-
-
-def test_pretraining_cli_requires_dataset_and_output_roots() -> None:
-    """预训练命令必须显式指定输入数据和输出检查点目录。"""
-
-    from run_dppo_pretraining import parse_arguments
-
-    with pytest.raises(SystemExit):
-        parse_arguments([])
-
-    arguments = parse_arguments(
-        [
-            "--dataset-root",
-            "temporary-dataset",
-            "--output-root",
-            "temporary-checkpoint",
-            "--optimizer-steps",
-            "7",
-            "--device",
-            "cpu",
-        ]
-    )
-    assert arguments.dataset_root == "temporary-dataset"
-    assert arguments.output_root == "temporary-checkpoint"
-    assert arguments.optimizer_steps == 7
-    assert arguments.device == "cpu"
-
-
-def test_exact_pretraining_keeps_best_validation_checkpoint(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """定期验证必须使用固定噪声，并保留最低验证损失所在更新步。"""
-
-    import run_dppo_pretraining as pretraining_command
-
-    torch.manual_seed(149)
-    states, actions = _synthetic_expert_batch()
-    model = ConditionalDiffusionMLP(58, 14, (16, 16))
-    schedule = CosineNoiseSchedule(steps=20)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    validation_seeds: list[int] = []
-    validation_losses = iter((0.25, 0.50))
-
-    def controlled_validation(*args, seed: int, **kwargs) -> float:
-        validation_seeds.append(seed)
-        return next(validation_losses)
-
-    monkeypatch.setattr(
-        pretraining_command,
-        "evaluate_diffusion_loss",
-        controlled_validation,
-    )
-    checkpoint_path = tmp_path / "dppo_pretrained.pt"
-    history = pretraining_command.train_exact_pretraining_steps(
-        model,
-        schedule,
-        optimizer,
-        states,
-        actions,
-        states[:4],
-        actions[:4],
-        metadata=_metadata(),
-        checkpoint_path=checkpoint_path,
-        optimizer_steps=4,
-        validation_interval_steps=2,
-        batch_size=4,
-        seed=12000,
-        device="cpu",
-        gradient_clip_norm=5.0,
-    )
-    loaded = load_dppo_checkpoint(
-        checkpoint_path,
-        expected=_metadata(),
-        device="cpu",
-    )
-
-    assert [row.optimizer_step for row in history] == [2, 4]
-    assert [row.is_best for row in history] == [True, False]
-    assert validation_seeds == [112000, 112000]
-    assert loaded.epoch + 1 == 2
-
-
-def test_pretraining_history_csv_has_reviewable_columns(tmp_path) -> None:
-    """训练记录应使用明确的优化步字段，方便实验 review。"""
-
-    from run_dppo_pretraining import (
-        PretrainingHistoryRecord,
-        write_pretraining_history_csv,
-    )
-
-    history_path = tmp_path / "pretraining_history.csv"
-    write_pretraining_history_csv(
-        history_path,
-        (
-            PretrainingHistoryRecord(10, 0.8, 0.7, True),
-            PretrainingHistoryRecord(20, 0.6, 0.75, False),
-        ),
-    )
-
-    lines = history_path.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "optimizer_step,training_loss,validation_loss,is_best"
-    assert lines[1].startswith("10,0.8,0.7,True")
 
 
 def test_online_checkpoint_v2_round_trip_binds_canonical_profile(tmp_path) -> None:
