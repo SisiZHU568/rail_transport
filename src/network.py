@@ -1,7 +1,7 @@
 """
 network.py
 
-本文件负责模拟轨旁 MEC 之间的数据传输。
+本文件负责模拟轨旁 MEC 之间以及轨旁到中心云的数据传输。
 
 当前采用线性轨旁网络：
 
@@ -13,15 +13,39 @@ MEC-1 到 MEC-2：1 跳
 MEC-1 到 MEC-3：2 跳
 MEC-2 到 MEC-5：3 跳
 
-当前传输时延由两部分组成：
+轨旁传输时延由两部分组成：
 
 1. 数据发送时延；
 2. 多跳传播与转发时延。
 """
 
-from typing import Any
+from typing import Any, Protocol
 
 from src.topology import LinearRailTopology
+
+
+class TransferNetworkProtocol(Protocol):
+    """SFC 执行器需要的统一数据传输接口。"""
+
+    def transfer_delay_ms(
+        self,
+        data_size_mb: float,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> float:
+        """返回一次节点间传输产生的时延。"""
+
+        raise NotImplementedError
+
+    def transfer_cost(
+        self,
+        data_size_mb: float,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> float:
+        """返回一次节点间传输产生的数据成本。"""
+
+        raise NotImplementedError
 
 
 class LinearMECNetwork:
@@ -41,6 +65,7 @@ class LinearMECNetwork:
         node_ids: list[int],
         adjacent_bandwidth_mbps: float,
         propagation_delay_per_hop_ms: float,
+        edge_data_cost_per_mb_hop: float,
     ) -> None:
         """
         创建线性 MEC 网络。
@@ -58,6 +83,9 @@ class LinearMECNetwork:
 
         propagation_delay_per_hop_ms:
             每经过一个网络跳数产生的固定时延，单位为毫秒。
+
+        edge_data_cost_per_mb_hop:
+            每 MB 数据经过一个轨旁网络跳数产生的成本。
         """
 
         if len(node_ids) == 0:
@@ -72,6 +100,9 @@ class LinearMECNetwork:
         if propagation_delay_per_hop_ms < 0:
             raise ValueError("每跳传播时延不能小于 0。")
 
+        if edge_data_cost_per_mb_hop < 0:
+            raise ValueError("轨旁数据传输单价不能小于 0。")
+
         # 使用 list() 创建副本，避免外部代码修改原始列表后
         # 影响已经创建好的网络对象。
         self.node_ids = list(node_ids)
@@ -82,6 +113,10 @@ class LinearMECNetwork:
 
         self.propagation_delay_per_hop_ms = (
             propagation_delay_per_hop_ms
+        )
+
+        self.edge_data_cost_per_mb_hop = (
+            edge_data_cost_per_mb_hop
         )
 
         # 建立“节点编号 → 在线性网络中的位置”的索引。
@@ -271,6 +306,176 @@ class LinearMECNetwork:
             + propagation_delay_ms
         )
 
+    def transfer_cost(
+        self,
+        data_size_mb: float,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> float:
+        """计算轨旁数据量、跳数和每跳单价形成的路由成本。"""
+
+        if data_size_mb < 0:
+            raise ValueError("传输数据量不能小于 0。")
+
+        # hop_count 同时负责验证源节点和目标节点是否存在。
+        hop_count = self.hop_count(
+            source_node_id=source_node_id,
+            destination_node_id=destination_node_id,
+        )
+
+        return (
+            data_size_mb
+            * hop_count
+            * self.edge_data_cost_per_mb_hop
+        )
+
+
+class HybridRailNetwork:
+    """
+    轨旁 MEC 与中心云组成的混合传输网络。
+
+    MEC—MEC 传输复用线性轨旁网络；只要一端是中心云，
+    就使用独立的云回传带宽、传播时延和数据单价。
+    """
+
+    def __init__(
+        self,
+        edge_network: LinearMECNetwork,
+        cloud_node_id: int,
+        cloud_backhaul_bandwidth_mbps: float,
+        cloud_one_way_propagation_delay_ms: float,
+        cloud_data_cost_per_mb: float,
+    ) -> None:
+        """创建边缘—云混合网络并检查参数。"""
+
+        if cloud_node_id in edge_network.node_ids:
+            raise ValueError(
+                "中心云节点编号不能与轨旁 MEC 重复。"
+            )
+
+        if cloud_backhaul_bandwidth_mbps <= 0:
+            raise ValueError("云回传带宽必须大于 0。")
+
+        if cloud_one_way_propagation_delay_ms < 0:
+            raise ValueError("云单向传播时延不能小于 0。")
+
+        if cloud_data_cost_per_mb < 0:
+            raise ValueError("云数据传输单价不能小于 0。")
+
+        self.edge_network = edge_network
+        self.cloud_node_id = cloud_node_id
+        self.cloud_backhaul_bandwidth_mbps = (
+            cloud_backhaul_bandwidth_mbps
+        )
+        self.cloud_one_way_propagation_delay_ms = (
+            cloud_one_way_propagation_delay_ms
+        )
+        self.cloud_data_cost_per_mb = (
+            cloud_data_cost_per_mb
+        )
+        self._known_node_ids = {
+            *edge_network.node_ids,
+            cloud_node_id,
+        }
+
+    def _validate_node_id(self, node_id: int) -> None:
+        """拒绝不属于轨旁网络或中心云的节点编号。"""
+
+        if node_id not in self._known_node_ids:
+            raise KeyError(
+                f"混合网络中不存在 node_id={node_id}。"
+            )
+
+    def _is_cloud_leg(
+        self,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> bool:
+        """判断本次传输是否需要经过中心云回传链路。"""
+
+        return (
+            source_node_id == self.cloud_node_id
+            or destination_node_id == self.cloud_node_id
+        )
+
+    def transfer_delay_ms(
+        self,
+        data_size_mb: float,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> float:
+        """计算轨旁或云回传传输时延。"""
+
+        if data_size_mb < 0:
+            raise ValueError("传输数据量不能小于 0。")
+
+        # 即使数据量为 0，也先检查两个节点是否合法。
+        self._validate_node_id(source_node_id)
+        self._validate_node_id(destination_node_id)
+
+        if (
+            source_node_id == destination_node_id
+            or data_size_mb == 0
+        ):
+            return 0.0
+
+        if not self._is_cloud_leg(
+            source_node_id,
+            destination_node_id,
+        ):
+            return self.edge_network.transfer_delay_ms(
+                data_size_mb=data_size_mb,
+                source_node_id=source_node_id,
+                destination_node_id=destination_node_id,
+            )
+
+        serialization_delay_ms = (
+            data_size_mb
+            * 8.0
+            / self.cloud_backhaul_bandwidth_mbps
+            * 1000.0
+        )
+
+        return (
+            serialization_delay_ms
+            + self.cloud_one_way_propagation_delay_ms
+        )
+
+    def transfer_cost(
+        self,
+        data_size_mb: float,
+        source_node_id: int,
+        destination_node_id: int,
+    ) -> float:
+        """计算轨旁或云回传数据成本。"""
+
+        if data_size_mb < 0:
+            raise ValueError("传输数据量不能小于 0。")
+
+        self._validate_node_id(source_node_id)
+        self._validate_node_id(destination_node_id)
+
+        if (
+            source_node_id == destination_node_id
+            or data_size_mb == 0
+        ):
+            return 0.0
+
+        if not self._is_cloud_leg(
+            source_node_id,
+            destination_node_id,
+        ):
+            return self.edge_network.transfer_cost(
+                data_size_mb=data_size_mb,
+                source_node_id=source_node_id,
+                destination_node_id=destination_node_id,
+            )
+
+        return (
+            data_size_mb
+            * self.cloud_data_cost_per_mb
+        )
+
 
 def build_linear_mec_network(
     config: dict[str, Any],
@@ -307,6 +512,47 @@ def build_linear_mec_network(
         propagation_delay_per_hop_ms=(
             config["network"][
                 "propagation_delay_per_hop_ms"
+            ]
+        ),
+        edge_data_cost_per_mb_hop=(
+            config["network"][
+                "edge_data_cost_per_mb_hop"
+            ]
+        ),
+    )
+
+
+def build_hybrid_rail_network(
+    config: dict[str, Any],
+    topology: LinearRailTopology,
+) -> HybridRailNetwork:
+    """根据配置创建同时支持轨旁与中心云的混合网络。"""
+
+    cloud_node = topology.cloud_node
+    if cloud_node is None:
+        raise ValueError(
+            "构建混合网络前必须在拓扑中启用中心云。"
+        )
+
+    return HybridRailNetwork(
+        edge_network=build_linear_mec_network(
+            config=config,
+            topology=topology,
+        ),
+        cloud_node_id=cloud_node.node_id,
+        cloud_backhaul_bandwidth_mbps=(
+            config["network"][
+                "cloud_backhaul_bandwidth_mbps"
+            ]
+        ),
+        cloud_one_way_propagation_delay_ms=(
+            config["network"][
+                "cloud_one_way_propagation_delay_ms"
+            ]
+        ),
+        cloud_data_cost_per_mb=(
+            config["network"][
+                "cloud_data_cost_per_mb"
             ]
         ),
     )

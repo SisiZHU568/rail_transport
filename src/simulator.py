@@ -33,7 +33,7 @@ from src.entities import (
     TrainState,
 )
 from src.mobility import TrainMobilityModel
-from src.network import LinearMECNetwork
+from src.network import TransferNetworkProtocol
 from src.placement import PlacementPolicy
 from src.prewarming import (
     NoPrewarmingPolicy,
@@ -203,7 +203,7 @@ class RailServerlessSFCSimulator:
     def __init__(
         self,
         topology: LinearRailTopology,
-        network: LinearMECNetwork,
+        network: TransferNetworkProtocol,
         mobility_model: TrainMobilityModel,
         workload: DeterministicWorkload,
         placement_policy: PlacementPolicy,

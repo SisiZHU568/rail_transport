@@ -31,6 +31,7 @@ from typing import Any
 
 from src.entities import SFCType
 from src.topology import LinearRailTopology
+from src.orchestration_config import load_ctmc_rate_maps
 
 
 @dataclass(frozen=True)
@@ -167,8 +168,8 @@ class FaultDomainReliabilityModel:
 
         # 检查拓扑中所有故障域是否都配置了可用率。
         topology_domain_ids = {
-            site.node.fault_domain
-            for site in topology.sites
+            node.fault_domain
+            for node in topology.compute_nodes
         }
 
         missing_domain_ids = (
@@ -251,11 +252,11 @@ class FaultDomainReliabilityModel:
         ] = {}
 
         for node_id in replica_node_ids:
-            site = self.topology.get_site(node_id)
+            node = self.topology.get_node(node_id)
 
-            domain_id = site.node.fault_domain
+            domain_id = node.fault_domain
             node_local_availability = (
-                site.node.reliability
+                node.reliability
             )
 
             domain_node_availabilities.setdefault(
@@ -484,8 +485,7 @@ class FaultDomainReliabilityModel:
         used_domain_ids = sorted(
             {
                 self.topology
-                .get_site(node_id)
-                .node
+                .get_node(node_id)
                 .fault_domain
                 for node_id in used_node_ids
             }
@@ -562,8 +562,7 @@ class FaultDomainReliabilityModel:
                 ):
                     node_availability = (
                         self.topology
-                        .get_site(node_id)
-                        .node
+                        .get_node(node_id)
                         .reliability
                     )
 
@@ -584,13 +583,11 @@ class FaultDomainReliabilityModel:
                 operational_nodes: set[int] = set()
 
                 for node_id in used_node_ids:
-                    site = self.topology.get_site(
+                    node = self.topology.get_node(
                         node_id
                     )
 
-                    domain_id = (
-                        site.node.fault_domain
-                    )
+                    domain_id = node.fault_domain
 
                     node_is_operational = (
                         domain_states[domain_id]
@@ -632,26 +629,11 @@ def build_fault_domain_reliability_model(
     """
 
     reliability_config = config["reliability"]
-
-    fault_domain_availability: dict[
-        int,
-        float,
-    ] = {}
-
-    for domain_config in (
-        reliability_config["fault_domains"]
-    ):
-        domain_id = domain_config["domain_id"]
-        availability = domain_config["availability"]
-
-        if domain_id in fault_domain_availability:
-            raise ValueError(
-                f"故障域 {domain_id} 重复配置。"
-            )
-
-        fault_domain_availability[domain_id] = (
-            availability
-        )
+    domain_rates, _ = load_ctmc_rate_maps(config)
+    fault_domain_availability = {
+        domain_id: rates.steady_availability
+        for domain_id, rates in domain_rates.items()
+    }
 
     return FaultDomainReliabilityModel(
         topology=topology,

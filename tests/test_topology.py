@@ -5,10 +5,19 @@ test_topology.py
 以及 MEC 接入和切换逻辑是否正确。
 """
 
+from copy import deepcopy
+
 import pytest
 
 from src.config import load_config
-from src.topology import build_linear_topology
+from src.entities import (
+    EdgeNode,
+    NodeType,
+)
+from src.topology import (
+    LinearRailTopology,
+    build_linear_topology,
+)
 
 
 def test_build_linear_topology() -> None:
@@ -103,3 +112,108 @@ def test_remaining_dwell_time() -> None:
     )
 
     assert dwell_time == pytest.approx(5.0)
+
+
+def test_cloud_is_compute_node_not_trackside_site() -> None:
+    """中心云参与计算部署，但不能参与列车接入和线路排序。"""
+
+    config = load_config("configs/debug.yaml")
+    topology = build_linear_topology(config)
+
+    assert topology.mec_count == 5
+    assert len(topology.sites) == 5
+    assert len(topology.compute_nodes) == 6
+    assert topology.cloud_node is not None
+    assert (
+        topology.cloud_node.node_type
+        is NodeType.CLOUD
+    )
+    assert (
+        topology.get_node(
+            topology.cloud_node.node_id
+        )
+        is topology.cloud_node
+    )
+
+    with pytest.raises(KeyError):
+        topology.get_site(
+            topology.cloud_node.node_id
+        )
+
+
+def test_cloud_can_be_disabled_without_changing_trackside_route() -> None:
+    """关闭云节点时仍保留原来的五 MEC 线路端点。"""
+
+    config = load_config("configs/debug.yaml")
+    config["topology"]["include_cloud"] = False
+
+    topology = build_linear_topology(config)
+
+    assert topology.cloud_node is None
+    assert len(topology.compute_nodes) == 5
+    assert topology.route_start_m == 0.0
+    assert topology.route_end_m == 8000.0
+
+
+def test_mec_fault_domains_come_from_configuration() -> None:
+    """故障域必须显式配置，不能在拓扑代码中按节点下标猜测。"""
+
+    config = deepcopy(load_config("configs/debug.yaml"))
+    config["topology"]["mec_fault_domain_ids"] = [4, 3, 2, 1, 0]
+
+    topology = build_linear_topology(config)
+
+    assert [site.node.fault_domain for site in topology.sites] == [4, 3, 2, 1, 0]
+
+
+def test_cloud_node_must_have_cloud_type() -> None:
+    """防止把普通边缘节点误注册为中心云。"""
+
+    config = load_config("configs/debug.yaml")
+    trackside_only = build_linear_topology(
+        {
+            **config,
+            "topology": {
+                **config["topology"],
+                "include_cloud": False,
+            },
+        }
+    )
+    invalid_cloud = EdgeNode(
+        node_id=5,
+        name="错误云节点",
+        node_type=NodeType.TRACKSIDE,
+        cpu_capacity=100.0,
+        memory_capacity_mb=1000.0,
+        reliability=0.99,
+        fault_domain=3,
+    )
+
+    with pytest.raises(ValueError, match="中心云"):
+        LinearRailTopology(
+            sites=list(trackside_only.sites),
+            cloud_node=invalid_cloud,
+        )
+
+
+def test_cloud_node_id_cannot_duplicate_trackside_id() -> None:
+    """中心云和轨旁 MEC 必须能通过节点编号唯一查询。"""
+
+    config = load_config("configs/debug.yaml")
+    config["topology"]["include_cloud"] = False
+    trackside_only = build_linear_topology(config)
+    duplicate_id_cloud = EdgeNode(
+        node_id=0,
+        name="重复编号的中心云",
+        node_type=NodeType.CLOUD,
+        cpu_capacity=1000.0,
+        memory_capacity_mb=5000.0,
+        reliability=0.999,
+        fault_domain=3,
+    )
+
+    with pytest.raises(ValueError, match="节点编号"):
+        LinearRailTopology(
+            sites=list(trackside_only.sites),
+            cloud_node=duplicate_id_cloud,
+        )

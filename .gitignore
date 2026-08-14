@@ -18,6 +18,8 @@ venv/
 # 实验输出
 results/logs/
 results/models/
+# DPPO 数据集和 PyTorch 检查点可由脚本重新生成，不提交大型二进制文件。
+results/dppo/
 
 # TensorBoard 日志
 runs/

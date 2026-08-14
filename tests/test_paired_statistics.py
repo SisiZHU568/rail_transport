@@ -170,9 +170,7 @@ def test_build_paired_rows() -> None:
     records = []
 
     for seed in [
-        100,
-        101,
-        102,
+        *range(100, 120),
     ]:
         records.append(
             {
@@ -193,7 +191,7 @@ def test_build_paired_rows() -> None:
         records.append(
             {
                 "policy_name": (
-                    "Double-DQN"
+                    "Reference-Policy"
                 ),
                 "episode_seed": seed,
                 "episode_reward": -2.0,
@@ -208,7 +206,7 @@ def test_build_paired_rows() -> None:
 
     rows = build_paired_comparison_rows(
         records=records,
-        reference_policy="Double-DQN",
+        reference_policy="Reference-Policy",
         baseline_policies=[
             "Fixed-COLD"
         ],
@@ -236,8 +234,14 @@ def test_build_paired_rows() -> None:
 
     assert reward_row[
         "win_count"
-    ] == 3
+    ] == 20
 
     assert reward_row[
         "loss_count"
     ] == 0
+
+    # 结论必须使用调用方传入的策略名称，通用统计模块不能写死某种算法。
+    assert reward_row["conclusion"] == "Reference-Policy显著更优"
+
+    with pytest.raises(TypeError, match="reference_policy"):
+        build_paired_comparison_rows(records=records)

@@ -12,8 +12,8 @@ paired_statistics.py
 
 统一规定：
 
-    improvement > 0：Double DQN更好
-    improvement < 0：Double DQN更差
+    improvement > 0：调用方指定的参考策略更好
+    improvement < 0：调用方指定的参考策略更差
 
 对于Reward和Success，数值越大越好。
 
@@ -546,7 +546,7 @@ def build_paired_comparison_rows(
     records: Sequence[
         Mapping[str, Any]
     ],
-    reference_policy: str = "Double-DQN",
+    reference_policy: str,
     baseline_policies: Sequence[str] | None = None,
     metric_names: Sequence[str] | None = None,
     confidence_level: float = 0.95,
@@ -899,12 +899,12 @@ def build_paired_comparison_rows(
 
             elif improvement_mean > 0.0:
                 conclusion = (
-                    "Double-DQN显著更优"
+                    f"{reference_policy}显著更优"
                 )
 
             elif improvement_mean < 0.0:
                 conclusion = (
-                    "Double-DQN显著更差"
+                    f"{reference_policy}显著更差"
                 )
 
             else:
