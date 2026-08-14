@@ -68,6 +68,7 @@ def test_internal_failure_discards_only_current_uncommitted_rollout() -> None:
     assert discarded == 1
     assert trainer.pending_count == 0
     assert trainer.internal_failure_count == 1
+    assert trainer.completed_update_count == 0
 
 
 def test_online_trainer_applies_early_decaying_teacher_bc() -> None:

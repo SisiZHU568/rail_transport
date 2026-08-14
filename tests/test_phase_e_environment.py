@@ -1,6 +1,7 @@
 """测试阶段 E 的一个完整慢帧确实连接慢层、快层、EDF 与奖励。"""
 
 import numpy as np
+import torch
 
 from src.config import load_config
 from src.cost_ledger import CostLedger
@@ -19,6 +20,7 @@ from src.phase_e_main_controller import PhaseEMainController
 from src.queue_manager import QueueStateManager
 from src.queue_state import StageFlowConfig
 from src.topology import build_linear_topology
+from run_phase_e_online_smoke import main as run_online_smoke
 
 
 def test_one_slow_frame_runs_every_fast_slot_and_returns_bounded_reward() -> None:
@@ -95,3 +97,16 @@ def test_one_slow_frame_runs_every_fast_slot_and_returns_bounded_reward() -> Non
     assert seen_versions[0].queue_version > 0  # 慢层观察已经包含本时隙新到达。
     assert result.raw_cost >= 0.0
     assert result.queue_equivalent_bits >= result.deficit_equivalent_bits >= 0.0
+
+
+def test_real_environment_completes_two_transactional_ppo_rollouts(
+    capsys,
+) -> None:
+    torch.manual_seed(3)
+
+    run_online_smoke(["--frames", "32", "--device", "cpu"])
+
+    output = capsys.readouterr().out
+    assert "internal_failure=" not in output
+    assert "update=1 " in output
+    assert "update=2 " in output
