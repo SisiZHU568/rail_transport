@@ -442,7 +442,7 @@ def test_online_checkpoint_rejects_v1_without_stability_binding(tmp_path) -> Non
 
 def test_online_checkpoint_refuses_unqualified_profile_before_writing(tmp_path) -> None:
     checkpoint_path = tmp_path / "online.pt"
-    profile = _qualified_profile(_metadata(), maximum_approximate_kl=1.0)
+    profile = _qualified_profile(_metadata(), maximum_approximate_kl=1.0001)
     assert profile.qualified is False
 
     with pytest.raises(ValueError, match="未通过"):

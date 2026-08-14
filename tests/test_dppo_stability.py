@@ -153,7 +153,7 @@ def test_settings_parser_rejects_invalid_boundaries(path, value) -> None:
 @pytest.mark.parametrize(
     ("changes", "reason"),
     [
-        ({"maximum_approximate_kl": 1.0}, "KL"),
+        ({"maximum_approximate_kl": 1.0001}, "KL"),
         ({"mean_clip_fraction": 0.09}, "clip fraction"),
         ({"mean_clip_fraction": 0.21}, "clip fraction"),
         ({"optimizer_step_count": 0}, "优化器"),
@@ -178,13 +178,46 @@ def test_candidate_qualification_reports_every_failure_branch(changes, reason) -
     assert any(reason in item for item in result.failure_reasons)
 
 
-def test_candidate_boundary_is_inclusive_but_target_kl_is_strict() -> None:
+def test_candidate_boundaries_are_inclusive() -> None:
     low = _result(0.10, clip_fraction=0.10)
     high = _result(0.01, clip_fraction=0.20)
+    kl_boundary = _result(0.001, kl=_settings().target_kl)
 
     assert low.qualified is True
     assert high.qualified is True
+    assert kl_boundary.qualified is True
     assert low.failure_reasons == ()
+
+
+@pytest.mark.parametrize(
+    ("changes", "reason"),
+    [
+        ({"internal_failure_count": 1}, "内部失败"),
+        ({"optimizer_step_count": 2, "minimum_optimizer_step_count": 3}, "有效优化器"),
+        ({"losses_finite": False}, "损失"),
+        ({"probabilities_finite": False}, "概率"),
+        ({"gradients_finite": False}, "梯度"),
+        ({"parameters_finite": False}, "参数"),
+    ],
+)
+def test_candidate_requires_zero_internal_failures_and_complete_numerical_health(
+    changes, reason
+) -> None:
+    values = {
+        "clip_ratio": 0.10,
+        "mean_clip_fraction": 0.15,
+        "mean_approximate_kl": 0.2,
+        "maximum_approximate_kl": 0.3,
+        "optimizer_step_count": 3,
+        "minimum_optimizer_step_count": 3,
+        "settings": _settings(),
+    }
+    values.update(changes)
+
+    result = evaluate_calibration_candidate(**values)
+
+    assert result.qualified is False
+    assert any(reason in item for item in result.failure_reasons)
 
 
 def test_candidate_dataclass_rejects_raw_nan_instead_of_leaking_invalid_json() -> None:
@@ -548,4 +581,4 @@ def test_profile_dataclass_rejects_invalid_identity_and_contradictions(tmp_path,
 
 
 def test_schema_version_is_explicit() -> None:
-    assert STABILITY_PROFILE_SCHEMA_VERSION == "dppo-stability-v1"
+    assert STABILITY_PROFILE_SCHEMA_VERSION == "dppo-stability-v2"

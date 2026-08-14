@@ -16,7 +16,7 @@ from typing import Any
 from src.dppo_training_config import DPPOStabilitySettings
 
 
-STABILITY_PROFILE_SCHEMA_VERSION = "dppo-stability-v1"
+STABILITY_PROFILE_SCHEMA_VERSION = "dppo-stability-v2"
 _LOWER_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -69,6 +69,12 @@ class DPPOCalibrationCandidateResult:
     finite: bool
     qualified: bool
     failure_reasons: tuple[str, ...]
+    internal_failure_count: int = 0
+    minimum_optimizer_step_count: int = 1
+    losses_finite: bool = True
+    probabilities_finite: bool = True
+    gradients_finite: bool = True
+    parameters_finite: bool = True
 
     def __post_init__(self) -> None:
         clip_ratio = _finite_float("clip_ratio", self.clip_ratio)
@@ -83,14 +89,33 @@ class DPPOCalibrationCandidateResult:
             "optimizer_step_count",
             self.optimizer_step_count,
         )
+        internal_failure_count = _nonnegative_integer(
+            "internal_failure_count", self.internal_failure_count
+        )
+        minimum_step_count = _positive_integer(
+            "minimum_optimizer_step_count", self.minimum_optimizer_step_count
+        )
+        health_flags = (
+            self.losses_finite,
+            self.probabilities_finite,
+            self.gradients_finite,
+            self.parameters_finite,
+        )
+        if any(not isinstance(value, bool) for value in health_flags):
+            raise ValueError("数值健康标志必须是 bool。")
         if not isinstance(self.finite, bool) or not isinstance(self.qualified, bool):
             raise ValueError("finite 和 qualified 必须是 bool。")
-        all_metrics_finite = all(value is not None for value in metrics)
+        all_metrics_finite = all(value is not None for value in metrics) and all(
+            health_flags
+        )
         if self.finite != all_metrics_finite:
             raise ValueError("finite 必须准确反映三个运行指标是否均为有限数。")
         reasons = _string_tuple("failure_reasons", self.failure_reasons)
         if self.qualified and (
-            not self.finite or step_count < 1 or bool(reasons)
+            not self.finite
+            or step_count < minimum_step_count
+            or internal_failure_count > 0
+            or bool(reasons)
         ):
             raise ValueError("qualified=True 与候选统计量或失败原因矛盾。")
 
@@ -99,6 +124,8 @@ class DPPOCalibrationCandidateResult:
         object.__setattr__(self, "mean_approximate_kl", metrics[1])
         object.__setattr__(self, "maximum_approximate_kl", metrics[2])
         object.__setattr__(self, "optimizer_step_count", step_count)
+        object.__setattr__(self, "internal_failure_count", internal_failure_count)
+        object.__setattr__(self, "minimum_optimizer_step_count", minimum_step_count)
         object.__setattr__(self, "failure_reasons", reasons)
 
 
@@ -119,6 +146,12 @@ def evaluate_calibration_candidate(
     maximum_approximate_kl: float,
     optimizer_step_count: int,
     settings: DPPOStabilitySettings,
+    internal_failure_count: int = 0,
+    minimum_optimizer_step_count: int = 1,
+    losses_finite: bool = True,
+    probabilities_finite: bool = True,
+    gradients_finite: bool = True,
+    parameters_finite: bool = True,
 ) -> DPPOCalibrationCandidateResult:
     """只依据原始统计量计算资格，调用者传入的旧结论不会参与判断。"""
 
@@ -140,10 +173,29 @@ def evaluate_calibration_candidate(
         "optimizer_step_count",
         optimizer_step_count,
     )
+    internal_failures = _nonnegative_integer(
+        "internal_failure_count", internal_failure_count
+    )
+    minimum_steps = _positive_integer(
+        "minimum_optimizer_step_count", minimum_optimizer_step_count
+    )
+    health = {
+        "损失": losses_finite,
+        "概率": probabilities_finite,
+        "梯度": gradients_finite,
+        "参数": parameters_finite,
+    }
+    for label, value in health.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"{label}有限性标志必须是 bool。")
+        if not value:
+            failure_reasons.append(f"{label}出现非有限值。")
+    if internal_failures > 0:
+        failure_reasons.append("校准轨迹存在内部失败。")
     maximum_kl = normalized_metrics["maximum_approximate_kl"]
-    if maximum_kl is not None and maximum_kl >= settings.target_kl:
+    if maximum_kl is not None and maximum_kl > settings.target_kl:
         failure_reasons.append(
-            "最大 approximate KL 必须严格小于 target KL。"
+            "最大 approximate KL 不能超过 target KL。"
         )
     mean_clip = normalized_metrics["mean_clip_fraction"]
     if mean_clip is not None and not (
@@ -152,10 +204,12 @@ def evaluate_calibration_candidate(
         <= settings.target_clip_fraction_max
     ):
         failure_reasons.append("mean clip fraction 不在目标闭区间内。")
-    if step_count < 1:
-        failure_reasons.append("优化器步数必须至少为 1。")
+    if step_count < minimum_steps:
+        failure_reasons.append("有效优化器步数未达到校准要求。")
 
-    finite = all(value is not None for value in normalized_metrics.values())
+    finite = all(value is not None for value in normalized_metrics.values()) and all(
+        health.values()
+    )
     reasons = tuple(failure_reasons)
     return DPPOCalibrationCandidateResult(
         clip_ratio=clip_ratio,
@@ -166,6 +220,12 @@ def evaluate_calibration_candidate(
         finite=finite,
         qualified=not reasons,
         failure_reasons=reasons,
+        internal_failure_count=internal_failures,
+        minimum_optimizer_step_count=minimum_steps,
+        losses_finite=losses_finite,
+        probabilities_finite=probabilities_finite,
+        gradients_finite=gradients_finite,
+        parameters_finite=parameters_finite,
     )
 
 
@@ -353,6 +413,12 @@ def _verify_profile_integrity(profile: DPPOStabilityProfile) -> None:
             maximum_approximate_kl=result.maximum_approximate_kl,
             optimizer_step_count=result.optimizer_step_count,
             settings=settings,
+            internal_failure_count=result.internal_failure_count,
+            minimum_optimizer_step_count=result.minimum_optimizer_step_count,
+            losses_finite=result.losses_finite,
+            probabilities_finite=result.probabilities_finite,
+            gradients_finite=result.gradients_finite,
+            parameters_finite=result.parameters_finite,
         )
         for result in profile.candidate_results
     )
@@ -417,6 +483,14 @@ def select_stability_profile(
             maximum_approximate_kl=by_value[value].maximum_approximate_kl,
             optimizer_step_count=by_value[value].optimizer_step_count,
             settings=settings,
+            internal_failure_count=by_value[value].internal_failure_count,
+            minimum_optimizer_step_count=(
+                by_value[value].minimum_optimizer_step_count
+            ),
+            losses_finite=by_value[value].losses_finite,
+            probabilities_finite=by_value[value].probabilities_finite,
+            gradients_finite=by_value[value].gradients_finite,
+            parameters_finite=by_value[value].parameters_finite,
         )
         for value in settings.clip_ratio_candidates
     )
@@ -524,6 +598,12 @@ _CANDIDATE_FIELDS = {
     "finite",
     "qualified",
     "failure_reasons",
+    "internal_failure_count",
+    "minimum_optimizer_step_count",
+    "losses_finite",
+    "probabilities_finite",
+    "gradients_finite",
+    "parameters_finite",
 }
 
 
@@ -570,6 +650,14 @@ def parse_stability_profile_json(serialized: str) -> DPPOStabilityProfile:
                 finite=item["finite"],
                 qualified=item["qualified"],
                 failure_reasons=tuple(reasons),
+                internal_failure_count=item["internal_failure_count"],
+                minimum_optimizer_step_count=item[
+                    "minimum_optimizer_step_count"
+                ],
+                losses_finite=item["losses_finite"],
+                probabilities_finite=item["probabilities_finite"],
+                gradients_finite=item["gradients_finite"],
+                parameters_finite=item["parameters_finite"],
             )
         )
 
